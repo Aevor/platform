@@ -32,4 +32,3 @@ func LoadConfig() *Config {
 		DBSSLMode:  os.Getenv("DB_SSLMODE"),
 	}
 }
-
