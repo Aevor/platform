@@ -10,36 +10,47 @@ import (
 )
 
 func main() {
-	// Connect to PostgreSQL
+	// Connect PostgreSQL
 	db, err := database.Connect()
+
 	if err != nil {
 		log.Fatal("failed to connect database: ", err)
 	}
 
-	// Run user migrations
+	// Run migrations
 	log.Println("running user migrations")
 
 	err = users.Migrate(db)
+
 	if err != nil {
 		log.Fatal("failed to migrate users table: ", err)
 	}
 
 	log.Println("user migration completed")
 
-	// Create Gin router
+	// Build dependencies
+	userRepository := users.NewRepository(db)
+	userService := users.NewService(userRepository)
+	userHandler := users.NewHandler(userService)
+
 	router := gin.Default()
 
-	// Health check endpoint
+	// Health endpoint
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
 			"status": "ok",
 		})
 	})
 
+	// User endpoints
+	router.POST("/users", userHandler.CreateUser)
+	router.GET("/users/:id", userHandler.GetUserByID)
+
 	log.Println("server running on :8080")
 
 	err = router.Run(":8080")
+
 	if err != nil {
-		log.Fatal("failed to start server: ", err)
+		log.Fatal(err)
 	}
 }
