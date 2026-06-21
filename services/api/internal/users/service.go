@@ -1,6 +1,9 @@
 package users
 
 import (
+	"errors"
+	"strings"
+
 	"github.com/google/uuid"
 )
 
@@ -21,6 +24,14 @@ func (s *Service) CreateUser(
 	email string,
 	avatarURL string,
 ) (*User, error) {
+
+	if githubID <= 0 {
+		return nil, errors.New("github_id is required")
+	}
+
+	if strings.TrimSpace(username) == "" {
+		return nil, errors.New("username is required")
+	}
 
 	user := &User{
 		GithubID:    githubID,
