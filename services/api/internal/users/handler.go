@@ -2,6 +2,7 @@ package users
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -15,14 +16,6 @@ func NewHandler(service *Service) *Handler {
 	return &Handler{
 		service: service,
 	}
-}
-
-type CreateUserRequest struct {
-	GithubID    int64  `json:"github_id"`
-	Username    string `json:"username"`
-	DisplayName string `json:"display_name"`
-	Email       string `json:"email"`
-	AvatarURL   string `json:"avatar_url"`
 }
 
 func (h *Handler) CreateUser(c *gin.Context) {
@@ -44,13 +37,16 @@ func (h *Handler) CreateUser(c *gin.Context) {
 	)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
+		c.JSON(http.StatusBadRequest, gin.H{
 			"error": err.Error(),
 		})
 		return
 	}
 
-	c.JSON(http.StatusCreated, user)
+	c.JSON(
+		http.StatusCreated,
+		ToUserResponse(user),
+	)
 }
 
 func (h *Handler) GetUserByID(c *gin.Context) {
@@ -74,5 +70,39 @@ func (h *Handler) GetUserByID(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, user)
+	c.JSON(
+		http.StatusOK,
+		ToUserResponse(user),
+	)
+}
+
+func (h *Handler) GetUserByGitHubID(c *gin.Context) {
+	githubIDParam := c.Param("id")
+
+	githubID, err := strconv.ParseInt(
+		githubIDParam,
+		10,
+		64,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid github id",
+		})
+		return
+	}
+
+	user, err := h.service.GetUserByGitHubID(githubID)
+
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error": "user not found",
+		})
+		return
+	}
+
+	c.JSON(
+		http.StatusOK,
+		ToUserResponse(user),
+	)
 }
