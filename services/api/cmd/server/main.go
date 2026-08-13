@@ -2,16 +2,26 @@ package main
 
 import (
 	"log"
+	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/Aevor/platform/services/api/internal/auth"
+	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
+	"github.com/Aevor/platform/services/api/pkg/config"
 	"github.com/Aevor/platform/services/api/pkg/database"
 )
 
 func main() {
-	db, err := database.Connect()
+	cfg, err := config.Load()
+
+	if err != nil {
+		log.Fatal("invalid configuration: ", err)
+	}
+
+	db, err := database.Connect(cfg)
 
 	if err != nil {
 		log.Fatal("failed to connect database: ", err)
@@ -29,15 +39,19 @@ func main() {
 
 	userRepository := users.NewRepository(db)
 	userService := users.NewService(userRepository)
-	userHandler := users.NewHandler(userService)
 
-	oauthConfig := auth.NewGitHubOAuthConfig()
+	oauthConfig := auth.NewGitHubOAuthConfig(cfg)
+	ghClient := github.NewClient(&http.Client{Timeout: 10 * time.Second})
+	jwtManager := auth.NewJWTManager(cfg.JWTSecret)
+
 	authService := auth.NewService(
 		oauthConfig,
+		userService,
+		jwtManager,
+		ghClient,
+		cfg.GitHubTokenEncryptionKey,
 	)
-	authHandler := auth.NewHandler(
-		authService,
-	)
+	authHandler := auth.NewHandler(authService)
 
 	router := gin.Default()
 
@@ -47,23 +61,25 @@ func main() {
 		})
 	})
 
-	router.POST("/users", userHandler.CreateUser)
-
-	router.GET("/users/:id", userHandler.GetUserByID)
-
-	router.GET(
-		"/users/github/:id",
-		userHandler.GetUserByGitHubID,
-	)
-
 	router.GET(
 		"/auth/github/login",
 		authHandler.GitHubLogin,
 	)
 
-	log.Println("server running on :8080")
+	router.GET(
+		"/auth/github/callback",
+		authHandler.GitHubCallback,
+	)
 
-	err = router.Run(":8080")
+	router.GET(
+		"/users/me",
+		auth.RequireAuth(jwtManager),
+		authHandler.GetMe,
+	)
+
+	log.Printf("server running on :%s", cfg.Port)
+
+	err = router.Run(":" + cfg.Port)
 
 	if err != nil {
 		log.Fatal(err)
