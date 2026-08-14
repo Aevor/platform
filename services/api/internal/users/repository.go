@@ -3,6 +3,7 @@ package users
 import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Repository struct {
@@ -51,4 +52,21 @@ func (r *Repository) GetByGitHubID(githubID int64) (*User, error) {
 
 func (r *Repository) Update(user *User) error {
 	return r.db.Save(user).Error
+}
+
+func (r *Repository) UpsertByGitHubID(user *User) error {
+	return r.db.
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "github_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"username",
+				"display_name",
+				"email",
+				"avatar_url",
+				"github_access_token",
+				"updated_at",
+			}),
+		}).
+		Create(user).
+		Error
 }

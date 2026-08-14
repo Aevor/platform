@@ -20,6 +20,8 @@ type User struct {
 
 	AvatarURL string `gorm:"type:text" json:"avatar_url"`
 
+	GitHubAccessToken *string `gorm:"type:text" json:"-"`
+
 	CreatedAt time.Time `json:"created_at"`
 
 	UpdatedAt time.Time `json:"updated_at"`

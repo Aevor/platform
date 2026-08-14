@@ -5,7 +5,12 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
+
+	"github.com/Aevor/platform/services/api/internal/github"
 )
+
+var ErrNotFound = errors.New("user not found")
 
 type Service struct {
 	repository *Repository
@@ -51,9 +56,36 @@ func (s *Service) CreateUser(
 }
 
 func (s *Service) GetUserByID(id uuid.UUID) (*User, error) {
-	return s.repository.GetByID(id)
+	user, err := s.repository.GetByID(id)
+
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrNotFound
+		}
+
+		return nil, err
+	}
+
+	return user, nil
 }
 
 func (s *Service) GetUserByGitHubID(githubID int64) (*User, error) {
 	return s.repository.GetByGitHubID(githubID)
+}
+
+func (s *Service) FindOrCreateByGitHubID(profile github.User, encryptedToken string) (*User, error) {
+	user := &User{
+		GithubID:          profile.ID,
+		Username:          profile.Login,
+		DisplayName:       profile.Name,
+		Email:             profile.Email,
+		AvatarURL:         profile.AvatarURL,
+		GitHubAccessToken: &encryptedToken,
+	}
+
+	if err := s.repository.UpsertByGitHubID(user); err != nil {
+		return nil, err
+	}
+
+	return user, nil
 }
