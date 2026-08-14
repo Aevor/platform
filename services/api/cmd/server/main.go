@@ -53,7 +53,13 @@ func main() {
 	)
 	authHandler := auth.NewHandler(authService)
 
-	router := gin.Default()
+	router := gin.New()
+	router.Use(
+		gin.LoggerWithConfig(gin.LoggerConfig{
+			SkipQueryString: true,
+		}),
+		gin.Recovery(),
+	)
 
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
