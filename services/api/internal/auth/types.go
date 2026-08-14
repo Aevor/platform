@@ -1,9 +1,9 @@
 package auth
 
-type GitHubUser struct {
-	ID        int64  `json:"id"`
-	Login     string `json:"login"`
-	Name      string `json:"name"`
-	Email     string `json:"email"`
-	AvatarURL string `json:"avatar_url"`
-}
+import "github.com/Aevor/platform/services/api/internal/github"
+
+type GitHubUser = github.User
+
+type contextKey string
+
+const UserIDKey contextKey = "user_id"
