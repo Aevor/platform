@@ -12,6 +12,9 @@ import (
 )
 
 func NewGitHubOAuthConfig(cfg *config.AppConfig) *oauth2.Config {
+	endpoint := githuboauth.Endpoint
+	endpoint.AuthStyle = oauth2.AuthStyleInParams
+
 	return &oauth2.Config{
 		ClientID:     cfg.GitHubClientID,
 		ClientSecret: cfg.GitHubClientSecret,
@@ -19,7 +22,7 @@ func NewGitHubOAuthConfig(cfg *config.AppConfig) *oauth2.Config {
 		Scopes: []string{
 			"read:user",
 		},
-		Endpoint: githuboauth.Endpoint,
+		Endpoint: endpoint,
 	}
 }
 
