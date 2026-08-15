@@ -6,21 +6,29 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-type Repository struct {
+type Repository interface {
+	Create(user *User) error
+	GetByID(id uuid.UUID) (*User, error)
+	GetByGitHubID(githubID int64) (*User, error)
+	Update(user *User) error
+	UpsertByGitHubID(user *User) error
+}
+
+type gormRepository struct {
 	db *gorm.DB
 }
 
-func NewRepository(db *gorm.DB) *Repository {
-	return &Repository{
+func NewRepository(db *gorm.DB) Repository {
+	return &gormRepository{
 		db: db,
 	}
 }
 
-func (r *Repository) Create(user *User) error {
+func (r *gormRepository) Create(user *User) error {
 	return r.db.Create(user).Error
 }
 
-func (r *Repository) GetByID(id uuid.UUID) (*User, error) {
+func (r *gormRepository) GetByID(id uuid.UUID) (*User, error) {
 	var user User
 
 	err := r.db.
@@ -35,7 +43,7 @@ func (r *Repository) GetByID(id uuid.UUID) (*User, error) {
 	return &user, nil
 }
 
-func (r *Repository) GetByGitHubID(githubID int64) (*User, error) {
+func (r *gormRepository) GetByGitHubID(githubID int64) (*User, error) {
 	var user User
 
 	err := r.db.
@@ -50,23 +58,26 @@ func (r *Repository) GetByGitHubID(githubID int64) (*User, error) {
 	return &user, nil
 }
 
-func (r *Repository) Update(user *User) error {
+func (r *gormRepository) Update(user *User) error {
 	return r.db.Save(user).Error
 }
 
-func (r *Repository) UpsertByGitHubID(user *User) error {
+func (r *gormRepository) UpsertByGitHubID(user *User) error {
 	return r.db.
-		Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "github_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{
-				"username",
-				"display_name",
-				"email",
-				"avatar_url",
-				"github_access_token",
-				"updated_at",
-			}),
-		}).
+		Clauses(
+			clause.OnConflict{
+				Columns: []clause.Column{{Name: "github_id"}},
+				DoUpdates: clause.AssignmentColumns([]string{
+					"username",
+					"display_name",
+					"email",
+					"avatar_url",
+					"github_access_token",
+					"updated_at",
+				}),
+			},
+			clause.Returning{},
+		).
 		Create(user).
 		Error
 }

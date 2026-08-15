@@ -14,7 +14,10 @@ const (
 	defaultTTL  = 7 * 24 * time.Hour
 )
 
-var ErrInvalidToken = errors.New("invalid token")
+var (
+	ErrInvalidToken     = errors.New("invalid token")
+	ErrInvalidJWTSecret = errors.New("jwt signing secret must be at least 32 bytes")
+)
 
 type JWTManager struct {
 	secret   []byte
@@ -23,16 +26,36 @@ type JWTManager struct {
 	now      func() time.Time
 }
 
-func NewJWTManager(secret []byte) *JWTManager {
-	return &JWTManager{
+type JWTManagerOption func(*JWTManager)
+
+func WithClock(now func() time.Time) JWTManagerOption {
+	return func(m *JWTManager) {
+		if now != nil {
+			m.now = now
+		}
+	}
+}
+
+func NewJWTManager(secret []byte, opts ...JWTManagerOption) *JWTManager {
+	m := &JWTManager{
 		secret:   secret,
 		issuer:   jwtIssuer,
 		audience: jwtAudience,
 		now:      time.Now,
 	}
+
+	for _, opt := range opts {
+		opt(m)
+	}
+
+	return m
 }
 
 func (m *JWTManager) Issue(userID uuid.UUID, ttl time.Duration) (string, error) {
+	if len(m.secret) < 32 {
+		return "", ErrInvalidJWTSecret
+	}
+
 	now := m.now()
 
 	claims := jwt.RegisteredClaims{
