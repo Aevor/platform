@@ -69,40 +69,58 @@ func (s *Service) LoginURL() (string, string, string, error) {
 	return url, state, verifier, nil
 }
 
-func (s *Service) HandleCallback(ctx context.Context, params CallbackParams) (*GitHubUser, error) {
+func (s *Service) HandleCallback(ctx context.Context, params CallbackParams) (string, *users.User, error) {
 	if params.ExpectedState == "" || params.CodeVerifier == "" {
-		return nil, ErrInvalidState
+		return "", nil, ErrInvalidState
 	}
 
 	if !VerifyState(params.ExpectedState, params.ActualState) {
-		return nil, ErrInvalidState
+		return "", nil, ErrInvalidState
 	}
 
 	if params.GitHubError == "access_denied" {
-		return nil, ErrAuthorizationDenied
+		return "", nil, ErrAuthorizationDenied
 	}
 
 	if params.GitHubError != "" {
-		return nil, ErrGitHubUnavailable
+		return "", nil, ErrGitHubUnavailable
 	}
 
 	if params.Code == "" {
-		return nil, ErrInvalidCode
+		return "", nil, ErrInvalidCode
 	}
 
 	token, err := s.oauthConfig.Exchange(ctx, params.Code, oauth2.VerifierOption(params.CodeVerifier))
 
 	if err != nil {
-		return nil, classifyExchangeError(err)
+		return "", nil, classifyExchangeError(err)
 	}
 
 	profile, err := s.ghClient.GetCurrentUser(ctx, token.AccessToken)
 
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 
-	return profile, nil
+	encryptedToken, err := users.Encrypt(token.AccessToken, s.encryptionKey)
+
+	if err != nil {
+		return "", nil, ErrInternal
+	}
+
+	user, err := s.users.FindOrCreateByGitHubID(*profile, encryptedToken)
+
+	if err != nil {
+		return "", nil, err
+	}
+
+	authToken, err := s.jwtManager.Issue(user.ID, defaultTTL)
+
+	if err != nil {
+		return "", nil, ErrInternal
+	}
+
+	return authToken, user, nil
 }
 
 func classifyExchangeError(err error) error {

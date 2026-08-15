@@ -6,7 +6,6 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
@@ -113,7 +112,7 @@ func (h *Handler) GitHubCallback(
 		GitHubError:   c.Query("error"),
 	}
 
-	profile, err := h.service.HandleCallback(c.Request.Context(), params)
+	authToken, user, err := h.service.HandleCallback(c.Request.Context(), params)
 
 	if err != nil {
 		switch {
@@ -158,35 +157,17 @@ func (h *Handler) GitHubCallback(
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"status": "ok",
-		"user":   profile,
+		"token": authToken,
+		"user":  users.ToUserResponse(user),
 	})
 }
 
 func (h *Handler) GetMe(
 	c *gin.Context,
 ) {
-	userIDValue, ok := c.Get(string(UserIDKey))
+	userID, ok := GetAuthenticatedUserID(c)
 
 	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "unauthorized",
-		})
-		return
-	}
-
-	userIDString, ok := userIDValue.(string)
-
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "unauthorized",
-		})
-		return
-	}
-
-	userID, err := uuid.Parse(userIDString)
-
-	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error": "unauthorized",
 		})
