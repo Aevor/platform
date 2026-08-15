@@ -13,10 +13,10 @@ import (
 var ErrNotFound = errors.New("user not found")
 
 type Service struct {
-	repository *Repository
+	repository Repository
 }
 
-func NewService(repository *Repository) *Service {
+func NewService(repository Repository) *Service {
 	return &Service{
 		repository: repository,
 	}
