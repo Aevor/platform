@@ -85,7 +85,7 @@ func (c *Client) GetCurrentUser(ctx context.Context, accessToken string) (*User,
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/user", nil)
 
 	if err != nil {
-		return nil, ErrUnavailable
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
