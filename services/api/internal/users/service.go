@@ -2,6 +2,7 @@ package users
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
@@ -10,7 +11,10 @@ import (
 	"github.com/Aevor/platform/services/api/internal/github"
 )
 
-var ErrNotFound = errors.New("user not found")
+var (
+	ErrNotFound       = errors.New("user not found")
+	ErrInvalidProfile = errors.New("invalid github profile")
+)
 
 type Service struct {
 	repository Repository
@@ -74,6 +78,14 @@ func (s *Service) GetUserByGitHubID(githubID int64) (*User, error) {
 }
 
 func (s *Service) FindOrCreateByGitHubID(profile github.User, encryptedToken string) (*User, error) {
+	if profile.ID <= 0 {
+		return nil, fmt.Errorf("%w: github_id must be positive", ErrInvalidProfile)
+	}
+
+	if strings.TrimSpace(profile.Login) == "" {
+		return nil, fmt.Errorf("%w: username is required", ErrInvalidProfile)
+	}
+
 	user := &User{
 		GithubID:          profile.ID,
 		Username:          profile.Login,

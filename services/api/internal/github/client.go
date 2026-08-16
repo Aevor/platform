@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -117,7 +118,7 @@ func (c *Client) GetCurrentUser(ctx context.Context, accessToken string) (*User,
 		return nil, ErrInvalidResponse
 	}
 
-	if user.ID == 0 {
+	if user.ID <= 0 || strings.TrimSpace(user.Login) == "" {
 		return nil, ErrInvalidResponse
 	}
 
