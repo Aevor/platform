@@ -286,6 +286,36 @@ func TestGetCurrentUser_EmptyUserRejected(t *testing.T) {
 	}
 }
 
+func TestGetCurrentUser_NegativeIDRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":-5,"login":"evil","name":"Evil"}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(nil, WithBaseURL(server.URL))
+
+	_, err := client.GetCurrentUser(context.Background(), testAccessToken)
+
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("error = %v, want github_invalid_response for a negative github id", err)
+	}
+}
+
+func TestGetCurrentUser_BlankLoginRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"id":583231,"login":"  "}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(nil, WithBaseURL(server.URL))
+
+	_, err := client.GetCurrentUser(context.Background(), testAccessToken)
+
+	if !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("error = %v, want github_invalid_response for a blank login", err)
+	}
+}
+
 func TestGetCurrentUser_DoesNotFollowRedirects(t *testing.T) {
 	var redirectTargetHit bool
 

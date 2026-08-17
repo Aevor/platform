@@ -317,6 +317,34 @@ func TestFindOrCreateByGitHubID_EncryptionKeyNeverPersisted(t *testing.T) {
 	}
 }
 
+func TestFindOrCreateByGitHubID_RejectsInvalidProfile(t *testing.T) {
+	repository := newFakeRepository()
+	service := NewService(repository)
+
+	scenarios := []github.User{
+		{ID: 0, Login: "octocat"},
+		{ID: -1, Login: "octocat"},
+		{ID: 583231, Login: ""},
+		{ID: 583231, Login: "   "},
+	}
+
+	for _, profile := range scenarios {
+		user, err := service.FindOrCreateByGitHubID(profile, "encrypted-token-value")
+
+		if !errors.Is(err, ErrInvalidProfile) {
+			t.Errorf("FindOrCreateByGitHubID(%+v) error = %v, want ErrInvalidProfile", profile, err)
+		}
+
+		if user != nil {
+			t.Errorf("FindOrCreateByGitHubID(%+v) returned a user, want nil", profile)
+		}
+	}
+
+	if len(repository.creates) != 0 {
+		t.Errorf("Create() calls = %d, want 0 (invalid profiles must never persist)", len(repository.creates))
+	}
+}
+
 func TestFindOrCreateByGitHubID_PropagatesRepositoryErrors(t *testing.T) {
 	wantErr := errors.New("database down")
 
