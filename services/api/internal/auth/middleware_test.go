@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -513,6 +514,56 @@ func TestRequireAuth_TokenNotInErrorResponse(t *testing.T) {
 
 	if strings.Contains(rec.Body.String(), tampered) || strings.Contains(rec.Body.String(), token) {
 		t.Error("error response contains JWT material")
+	}
+
+	var body map[string]string
+
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON error body: %v", err)
+	}
+
+	if body["error"] != "unauthorized" {
+		t.Errorf("error = %q, want %q", body["error"], "unauthorized")
+	}
+}
+
+func TestRequireAuth_ModifiedPayloadRejected(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	manager := newTestJWTManager()
+	router := newProtectedRouter(manager)
+
+	userID := uuid.New()
+
+	valid, err := manager.Issue(userID, defaultTTL)
+
+	if err != nil {
+		t.Fatalf("Issue() error: %v", err)
+	}
+
+	// Classic payload-tampering attack: swap in claims for a DIFFERENT
+	// subject while keeping the original header and signature. The JWT must
+	// be rejected because the signature no longer covers the payload.
+	attackerClaims, err := json.Marshal(validRegisteredClaims(uuid.New()))
+
+	if err != nil {
+		t.Fatalf("could not marshal attacker claims: %v", err)
+	}
+
+	parts := strings.Split(valid, ".")
+
+	if len(parts) != 3 {
+		t.Fatalf("valid token is not a three-segment JWS: %q", valid)
+	}
+
+	parts[1] = base64.RawURLEncoding.EncodeToString(attackerClaims)
+
+	forged := strings.Join(parts, ".")
+
+	rec := performProtectedRequest(router, "Bearer "+forged)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d for a modified payload (body %s)", rec.Code, http.StatusUnauthorized, rec.Body.String())
 	}
 
 	var body map[string]string
