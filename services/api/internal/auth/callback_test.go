@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -834,38 +835,57 @@ func TestCallback_CookieClearedOnInvalidState(t *testing.T) {
 	assertOAuthCookieCleared(t, rec)
 }
 
-func TestCallback_GitHubUserEndpointErrorMapped(t *testing.T) {
+func TestCallback_GitHubUserEndpointErrorsCollapseToUnavailable(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	te := newTokenEndpoint(t, nil)
-	defer te.close()
-
-	ue := newUserEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"message":"Bad credentials"}`))
-	})
-	defer ue.close()
-
-	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service)
-	router := newCallbackRouter(handler)
-
-	cookie, stored, _ := loginForCallback(t, handler)
-
-	query := url.Values{}
-	query.Set("code", "valid-auth-code")
-	query.Set("state", stored.State)
-
-	rec := callCallback(router, cookie, query)
-
-	assertCallbackError(t, rec, http.StatusUnauthorized, "github_api_unauthorized")
-
-	if te.requests != 1 {
-		t.Errorf("token endpoint requests = %d, want 1", te.requests)
+	scenarios := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"401 unauthorized", http.StatusUnauthorized, `{"message":"Bad credentials"}`},
+		{"403 forbidden", http.StatusForbidden, `{"message":"Resource not accessible"}`},
+		{"429 rate limited", http.StatusTooManyRequests, `{"message":"API rate limit exceeded"}`},
+		{"500 server error", http.StatusInternalServerError, `{"message":"Internal Server Error"}`},
+		{"404 unexpected", http.StatusNotFound, `{"message":"Not Found"}`},
+		{"malformed json", http.StatusOK, `{not-json`},
+		{"empty profile", http.StatusOK, `{}`},
 	}
 
-	if ue.requests != 1 {
-		t.Errorf("user endpoint requests = %d, want 1", ue.requests)
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			te := newTokenEndpoint(t, nil)
+			defer te.close()
+
+			ue := newUserEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(sc.status)
+				w.Write([]byte(sc.body))
+			})
+			defer ue.close()
+
+			service, _ := newCallbackService(te.server.URL, ue.server.URL)
+			handler := NewHandler(service)
+			router := newCallbackRouter(handler)
+
+			cookie, stored, _ := loginForCallback(t, handler)
+
+			query := url.Values{}
+			query.Set("code", "valid-auth-code")
+			query.Set("state", stored.State)
+
+			rec := callCallback(router, cookie, query)
+
+			// Design §6 exposes ONE code for every GitHub failure.
+			assertCallbackError(t, rec, http.StatusInternalServerError, "github_unavailable")
+
+			if te.requests != 1 {
+				t.Errorf("token endpoint requests = %d, want 1", te.requests)
+			}
+
+			if ue.requests != 1 {
+				t.Errorf("user endpoint requests = %d, want 1", ue.requests)
+			}
+		})
 	}
 }
 
@@ -1315,7 +1335,7 @@ func TestCallback_FailedGitHubAuthProducesNoJWT(t *testing.T) {
 
 	rec := callCallback(router, cookie, query)
 
-	assertCallbackError(t, rec, http.StatusUnauthorized, "github_api_unauthorized")
+	assertCallbackError(t, rec, http.StatusInternalServerError, "github_unavailable")
 
 	var body map[string]interface{}
 
@@ -1440,6 +1460,253 @@ func TestCallback_JWTClaimsCarryOnlyAevorIdentity(t *testing.T) {
 	} {
 		if strings.Contains(payload, sensitive) {
 			t.Errorf("JWT payload contains %q", sensitive)
+		}
+	}
+}
+
+func TestCallback_StateCookieConsumedAfterSuccess(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	te := newTokenEndpoint(t, nil)
+	defer te.close()
+
+	ue := newUserEndpoint(t, nil)
+	defer ue.close()
+
+	service, _ := newCallbackService(te.server.URL, ue.server.URL)
+	handler := NewHandler(service)
+	router := newCallbackRouter(handler)
+
+	cookie, stored, _ := loginForCallback(t, handler)
+
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
+
+	first := callCallback(router, cookie, query)
+
+	if first.Code != http.StatusOK {
+		t.Fatalf("first callback status = %d, want %d (body %s)", first.Code, http.StatusOK, first.Body.String())
+	}
+
+	// A replay without the (now-cleared) cookie must fail before any exchange.
+	second := callCallback(router, nil, query)
+
+	assertCallbackError(t, second, http.StatusBadRequest, "invalid_state")
+
+	if te.requests != 1 {
+		t.Errorf("token endpoint requests = %d, want exactly 1 across the whole flow", te.requests)
+	}
+}
+
+func TestCallback_ReplayedAuthorizationCodeRejected(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	requests := 0
+
+	te := newTokenEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+
+		if requests > 1 {
+			// Simulate GitHub rejecting the single-use code on replay.
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"bad_verification_code","error_description":"The code passed is incorrect or expired."}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"fake-access-token","token_type":"bearer","scope":"read:user"}`))
+	})
+	defer te.close()
+
+	ue := newUserEndpoint(t, nil)
+	defer ue.close()
+
+	service, _ := newCallbackService(te.server.URL, ue.server.URL)
+	handler := NewHandler(service)
+	router := newCallbackRouter(handler)
+
+	cookie, stored, _ := loginForCallback(t, handler)
+
+	query := url.Values{}
+	query.Set("code", "single-use-code")
+	query.Set("state", stored.State)
+
+	first := callCallback(router, cookie, query)
+
+	if first.Code != http.StatusOK {
+		t.Fatalf("first callback status = %d, want %d (body %s)", first.Code, http.StatusOK, first.Body.String())
+	}
+
+	// Attacker replays the exact captured request (cookie + state + code).
+	second := callCallback(router, cookie, query)
+
+	assertCallbackError(t, second, http.StatusBadRequest, "invalid_code")
+
+	if ue.requests != 1 {
+		t.Errorf("user endpoint requests = %d, want 1 (no profile fetch for a replayed code)", ue.requests)
+	}
+}
+
+func TestCallback_ClientSuppliedGitHubIDIgnored(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	te := newTokenEndpoint(t, nil)
+	defer te.close()
+
+	ue := newUserEndpoint(t, nil)
+	defer ue.close()
+
+	service, repo := newCallbackService(te.server.URL, ue.server.URL)
+	handler := NewHandler(service)
+	router := newCallbackRouter(handler)
+
+	cookie, stored, _ := loginForCallback(t, handler)
+
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
+	query.Set("github_id", "999999999")
+	query.Set("user_id", "attacker-controlled-id")
+
+	rec := callCallback(router, cookie, query)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var body map[string]interface{}
+
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+
+	user, ok := body["user"].(map[string]interface{})
+
+	if !ok {
+		t.Fatal("response is missing the user object")
+	}
+
+	if user["github_id"] != float64(583231) {
+		t.Errorf("user.github_id = %v, want 583231 (identity must come from the GitHub profile, never query params)", user["github_id"])
+	}
+
+	if _, ok := repo.users[999999999]; ok {
+		t.Error("attacker-supplied github_id was persisted")
+	}
+}
+
+func TestCallback_NonAccessDeniedErrorMappedToUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	te := newTokenEndpoint(t, nil)
+	defer te.close()
+
+	ue := newUserEndpoint(t, nil)
+	defer ue.close()
+
+	service, _ := newCallbackService(te.server.URL, ue.server.URL)
+	handler := NewHandler(service)
+	router := newCallbackRouter(handler)
+
+	cookie, stored, _ := loginForCallback(t, handler)
+
+	query := url.Values{}
+	query.Set("error", "redirect_uri_mismatch")
+	query.Set("state", stored.State)
+
+	rec := callCallback(router, cookie, query)
+
+	assertCallbackError(t, rec, http.StatusInternalServerError, "github_unavailable")
+
+	if te.requests != 0 {
+		t.Errorf("token endpoint requests = %d, want 0", te.requests)
+	}
+}
+
+func TestCallback_MissingAccessTokenMappedToUnavailable(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	te := newTokenEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"token_type":"bearer","scope":"read:user"}`))
+	})
+	defer te.close()
+
+	ue := newUserEndpoint(t, nil)
+	defer ue.close()
+
+	service, repo := newCallbackService(te.server.URL, ue.server.URL)
+	handler := NewHandler(service)
+	router := newCallbackRouter(handler)
+
+	cookie, stored, _ := loginForCallback(t, handler)
+
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
+
+	rec := callCallback(router, cookie, query)
+
+	// oauth2 rejects a missing access_token at exchange time; the collapse to
+	// github_unavailable is the design §6 contract for GitHub-side failures.
+	assertCallbackError(t, rec, http.StatusInternalServerError, "github_unavailable")
+
+	if ue.requests != 0 {
+		t.Errorf("user endpoint requests = %d, want 0 (no profile fetch without a token)", ue.requests)
+	}
+
+	if len(repo.users) != 0 {
+		t.Errorf("stored users = %d, want 0", len(repo.users))
+	}
+}
+
+func TestCallback_GitHubFailureLogsCarryNoSecrets(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	te := newTokenEndpoint(t, nil)
+	defer te.close()
+
+	ue := newUserEndpoint(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"message":"Bad credentials"}`))
+	})
+	defer ue.close()
+
+	service, _ := newCallbackService(te.server.URL, ue.server.URL)
+	handler := NewHandler(service)
+	router := newCallbackRouter(handler)
+
+	cookie, stored, _ := loginForCallback(t, handler)
+
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
+
+	var logged bytes.Buffer
+
+	oldOutput := log.Writer()
+	log.SetOutput(&logged)
+
+	defer log.SetOutput(oldOutput)
+
+	rec := callCallback(router, cookie, query)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusInternalServerError, rec.Body.String())
+	}
+
+	output := logged.String()
+
+	for _, sensitive := range []string{
+		"fake-access-token",
+		stored.State,
+		stored.Verifier,
+		"test-client-secret",
+		"valid-auth-code",
+	} {
+		if strings.Contains(output, sensitive) {
+			t.Errorf("log output contains sensitive value %q", sensitive)
 		}
 	}
 }
