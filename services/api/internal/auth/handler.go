@@ -7,7 +7,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
 )
 
@@ -128,23 +127,7 @@ func (h *Handler) GitHubCallback(
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "invalid_code",
 			})
-		case errors.Is(err, github.ErrUnauthorized):
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error": "github_api_unauthorized",
-			})
-		case errors.Is(err, github.ErrRateLimited):
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error": "github_rate_limited",
-			})
-		case errors.Is(err, github.ErrInvalidResponse):
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "github_invalid_response",
-			})
-		case errors.Is(err, github.ErrAPIError):
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "github_api_error",
-			})
-		case errors.Is(err, ErrGitHubUnavailable) || errors.Is(err, github.ErrUnavailable):
+		case errors.Is(err, ErrGitHubUnavailable):
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": "github_unavailable",
 			})
