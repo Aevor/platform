@@ -19,12 +19,18 @@ func parsedClaims(t *testing.T, token string) *jwt.RegisteredClaims {
 
 	claims := &jwt.RegisteredClaims{}
 
+	// Several tests intentionally issue tokens at a FIXED past instant to
+	// prove clock injection works; parsing them with live wall-clock
+	// validation makes those tests time bombs that start failing once
+	// defaultTTL has elapsed. This helper only inspects claim values —
+	// validity semantics are covered by manager.Verify and middleware tests.
 	_, err := jwt.ParseWithClaims(
 		token,
 		claims,
 		func(token *jwt.Token) (any, error) {
 			return testJWTSecret, nil
 		},
+		jwt.WithoutClaimsValidation(),
 	)
 
 	if err != nil {
