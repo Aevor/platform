@@ -24,9 +24,23 @@ Canonical project docs live in the `docs` repo (`docs/development-state.md`); th
   - JWT never logged; token never echoed in error responses; error response reveals only `{"error":"unauthorized"}`.
   - Tests (`internal/auth/middleware_test.go`): valid token succeeds; missing/malformed/tampered/expired/wrong-signature/missing-sub/invalid-sub/wrong-issuer/wrong-audience rejected; wrong HMAC alg (HS384/HS512 same secret), `alg=none`, and explicit algorithm-confusion (RS256/ES256 with valid keys) rejected; verified UUID reaches context + helper retrieves it; unauthenticated requests never reach the handler; JWT absent from logs and error bodies; query/`X-User-Id` header cannot override JWT identity; helper fails safely without middleware. Deterministic tamper helper (`tamperToken`) — `-count=20` stable.
 
+- **Task 1 Part 9 — Authenticated `/users/me` endpoint test suite:** committed via PRs #33–#38 (see `docs/development-state.md` for the full list).
+
+## Completed (2026-08-22 — broken-functionality repairs)
+
+- **FIX — OAuth re-login upsert column mismatch (production bug):** `UpsertByGitHubID` referenced a nonexistent column `github_access_token` in the `ON CONFLICT DO UPDATE` clause, while GORM maps `User.GitHubAccessToken` to the column `git_hub_access_token`. First-time logins inserted fine, but every REPEAT login failed with `column excluded.github_access_token does not exist`. NOTE: this fix had previously been reported as done but never existed in any commit (`git log --all -S` confirms); it is now actually fixed.
+  - `internal/users/repository.go`: corrected column to `git_hub_access_token`; conflict/assignment columns extracted into package-level vars (`upsertConflictColumns`, `upsertAssignmentColumns`).
+  - `internal/users/model.go`: explicit `gorm:"column:git_hub_access_token"` tag pins the mapping (no physical schema change; AutoMigrate no-op).
+  - New `internal/users/repository_upsert_test.go`: schema-consistency regression tests that validate every upsert-referenced column against the model's parsed GORM mapping (verified to FAIL against the old buggy code).
+  - New `internal/users/repository_integration_test.go`: opt-in real-Postgres integration test (`AEVOR_TEST_DATABASE_DSN`) covering insert + conflict-update paths, UUID preservation, token rotation; skipped by default so unit runs stay hermetic. PASSES against live PostgreSQL 16 on localhost:5432.
+- **FIX — time-bomb JWT tests:** `TestJWT_ContainsCorrectSubject/ContainsCorrectIssuedAt/ContainsCorrectExpiration/IndependentTokensHaveIndependentTiming` issue tokens at a fixed 2026-08-15 instant (7-day TTL) and parsed them with live wall-clock validation — permanently failing once 2026-08-22 arrived. `parsedClaims` now parses with `jwt.WithoutClaimsValidation()` (claim inspection only); validity semantics remain covered by `manager.Verify` and middleware tests. Suite green again.
+
 ## Current
 
-- **Task 1 close-out:** reconcile the callback error surface with design §6 (client codes `github_api_unauthorized`/`github_rate_limited`/`github_invalid_response`/`github_api_error` still exposed beyond the design set); end-to-end verify `/users/me` against the issued JWT; optional real-Postgres integration tests for the upsert path.
+- **Task 1 close-out (IN PROGRESS):**
+  - DONE: repairs implemented, reviewed, tested, and committed on branch `fix/users-upsert-token-column` (`098dd4d` fix+regression tests, `a8b4479` jwt deflake, docs commit).
+  - BLOCKED (human step): manual end-to-end OAuth re-login in a real browser — exercises the fixed conflict path live (DB level already proven by the integration test).
+  - TODO (Sanjeev): push the branch, open PR, review, approve, merge.
 
 ## Next
 

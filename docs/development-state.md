@@ -5,9 +5,24 @@ NOTE: the canonical project docs live in the `docs` repo at `docs/development-st
 
 ## Branch / baseline
 
-- Working branch: `feat`.
-- Baseline: `6e18c0f` — merged Task 2 implementation plus follow-up PRs #19 (AES-GCM crypto tests), #20 (users service validation tests), #21 (user DTO tests), #22 (health `StatusOK` constant), #23 (github request build error wrapping).
-- Task 1 Parts 1–8 changes are UNCOMMITTED in the working tree. Nothing committed/pushed.
+- Working branch: `fix/users-upsert-token-column` (ahead of `main` @ `1040ebc` by `098dd4d` fix(users) upsert column + regression/integration tests, `a8b4479` test(auth) jwt deflake, plus docs commit). Task 1 Parts 1–10 were previously merged to `main`/`origin/main` via PRs up to #38. The `feat` branch is STALE — do not treat it as current.
+
+## Security gate status (verified 2026-08-22)
+
+- FACT: no ref tip tracks `.env`; `.gitignore` covers `.env`/`.env.*` (`check-ignore` confirms).
+- FACT: the leaked commits `b9784cd` and `fd9752c` STILL EXIST and are ancestors of `origin/main` — **git-history purge is NOT done**; secrets remain recoverable from remote history until filter-repo + force-push (owner decision).
+- UNVERIFIABLE locally: GitHub-side OAuth secret revocation/rotation — owner must confirm.
+
+## Broken-functionality repairs (2026-08-22)
+
+- **FACT:** the OAuth re-login upsert column mismatch was LIVE on `main` despite earlier reports of being fixed — no commit on any branch ever contained the correction (`git log --all -S "git_hub_access_token"` empty). `UpsertByGitHubID` referenced nonexistent column `github_access_token` while GORM maps `User.GitHubAccessToken` → `git_hub_access_token`; every repeat login failed with `column excluded.github_access_token does not exist`.
+- FIXED: repository clause corrected + column mapping pinned in the model tag + schema-consistency regression tests (`repository_upsert_test.go`, proven to fail against the old code) + opt-in real-Postgres integration test (`repository_integration_test.go`, gated by `AEVOR_TEST_DATABASE_DSN`) covering insert + conflict-update paths. Integration test PASSES against live PostgreSQL 16 (localhost:5432).
+- FIXED: JWT test time bomb — four tests issued tokens at fixed 2026-08-15 (7-day TTL) and parsed with wall-clock validation, failing permanently from 2026-08-22. `parsedClaims` now uses `jwt.WithoutClaimsValidation()`; validity coverage unchanged.
+- Verified 2026-08-22 (post-review): `gofmt -l .` clean; `go build ./...`, `go vet ./...`, `go test -count=1 ./...`, `go test -race -count=1 ./...` all pass; integration test passes against live PostgreSQL 16 (localhost:5432) leaving schema and existing rows untouched; server boots, `/health` 200, `/auth/github/login` 302 with PKCE S256 params, `/users/me` uniform `401` without JWT; production auth code (`jwt.go`/`middleware.go`) untouched by the branch.
+
+## Environment note
+
+- FACT (2026-08-22): local development PostgreSQL 16.15 now runs natively via Homebrew on host port `5432` (db/user/password = `aevor`). The Docker Compose stack on host port `5433` is NOT currently running. `.env` points at `localhost:5432`.
 
 ## Auth & users implementation (Task 1)
 
@@ -44,9 +59,7 @@ GitHub OAuth 2.0 + PKCE login lives in `services/api`:
 
 ### Known gaps / not yet done
 
-- Callback error surface still exposes client codes (`github_api_unauthorized`, `github_rate_limited`, `github_invalid_response`, `github_api_error`) beyond design §6; reconcile during Task 1 close-out.
-- Real-DB integration tests for the upsert path require a running test Postgres (currently covered by fake-repo unit tests).
-- End-to-end `/users/me` verification against the issued JWT still to be exercised manually once credentials are confirmed.
+- Manual end-to-end OAuth RE-LOGIN verification in a real browser (the conflict/update persistence path is proven at DB level; a live second GitHub login still to be exercised by the developer).
 - Token rotation / key-rotation handling is future work.
 
 ## Infrastructure
