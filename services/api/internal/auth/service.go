@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -99,7 +100,11 @@ func (s *Service) HandleCallback(ctx context.Context, params CallbackParams) (st
 	profile, err := s.ghClient.GetCurrentUser(ctx, token.AccessToken)
 
 	if err != nil {
-		return "", nil, err
+		// Internal diagnostic only: the typed GitHub error contains no
+		// token material. The external contract collapses every GitHub
+		// failure into the single design code (task-1-oauth-design §6).
+		log.Printf("github profile fetch failed: %v", err)
+		return "", nil, ErrGitHubUnavailable
 	}
 
 	encryptedToken, err := users.Encrypt(token.AccessToken, s.encryptionKey)
@@ -111,6 +116,11 @@ func (s *Service) HandleCallback(ctx context.Context, params CallbackParams) (st
 	user, err := s.users.FindOrCreateByGitHubID(*profile, encryptedToken)
 
 	if err != nil {
+		if errors.Is(err, users.ErrInvalidProfile) {
+			log.Printf("github profile rejected by user service: %v", err)
+			return "", nil, ErrGitHubUnavailable
+		}
+
 		return "", nil, err
 	}
 
