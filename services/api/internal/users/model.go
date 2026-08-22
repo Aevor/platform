@@ -20,7 +20,9 @@ type User struct {
 
 	AvatarURL string `gorm:"type:text" json:"avatar_url"`
 
-	GitHubAccessToken *string `gorm:"type:text" json:"-"`
+	// Column is pinned explicitly: GORM's default naming maps
+	// GitHubAccessToken to git_hub_access_token (not github_access_token).
+	GitHubAccessToken *string `gorm:"column:git_hub_access_token;type:text" json:"-"`
 
 	CreatedAt time.Time `json:"created_at"`
 
