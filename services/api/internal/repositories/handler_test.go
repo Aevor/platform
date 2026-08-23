@@ -139,7 +139,7 @@ func newListFixture(
 
 	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository), issues: make(map[issueKey]RepositoryIssue)}
 
-	service := NewService(userService, client, store, testEncryptionKey())
+	service := newTestService(t, userService, client, store)
 
 	jwtManager := auth.NewJWTManager([]byte(testJWTSecret))
 
