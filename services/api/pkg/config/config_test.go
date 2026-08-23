@@ -18,6 +18,9 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("GITHUB_REDIRECT_URL", "http://localhost:8080/auth/github/callback")
 	t.Setenv("GITHUB_TOKEN_ENCRYPTION_KEY", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 	t.Setenv("JWT_SECRET", "test-jwt-signing-secret-that-is-at-least-32-bytes")
+	t.Setenv("WORKSPACE_ROOT", t.TempDir())
+	t.Setenv("CLONE_ALLOWED_HOSTS", "")
+	t.Setenv("CLONE_ALLOW_FILE_URLS", "")
 }
 
 func TestLoad_ValidConfiguration(t *testing.T) {
@@ -31,6 +34,51 @@ func TestLoad_ValidConfiguration(t *testing.T) {
 
 	if len(cfg.JWTSecret) < 32 {
 		t.Errorf("JWTSecret is %d bytes, want at least 32", len(cfg.JWTSecret))
+	}
+
+	if cfg.WorkspaceRoot == "" {
+		t.Errorf("WorkspaceRoot is empty, want the controlled workspace directory")
+	}
+
+	if len(cfg.CloneAllowedHosts) != 1 || cfg.CloneAllowedHosts[0] != "github.com" {
+		t.Errorf("CloneAllowedHosts = %v, want default [github.com]", cfg.CloneAllowedHosts)
+	}
+
+	if cfg.CloneAllowFileTransport {
+		t.Errorf("CloneAllowFileTransport = true by default, want false")
+	}
+}
+
+func TestLoad_MissingWorkspaceRootFailsSafely(t *testing.T) {
+	setValidEnv(t)
+
+	t.Setenv("WORKSPACE_ROOT", "")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("Load() succeeded without WORKSPACE_ROOT")
+	} else if !strings.Contains(err.Error(), "WORKSPACE_ROOT") {
+		t.Errorf("error = %q, want it to name WORKSPACE_ROOT", err)
+	}
+}
+
+func TestLoad_CloneHostsAndFileTransportFromEnv(t *testing.T) {
+	setValidEnv(t)
+
+	t.Setenv("CLONE_ALLOWED_HOSTS", "github.com, gitlab.com ")
+	t.Setenv("CLONE_ALLOW_FILE_URLS", "true")
+
+	cfg, err := Load()
+
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if len(cfg.CloneAllowedHosts) != 2 || cfg.CloneAllowedHosts[0] != "github.com" || cfg.CloneAllowedHosts[1] != "gitlab.com" {
+		t.Errorf("CloneAllowedHosts = %v, want [github.com gitlab.com]", cfg.CloneAllowedHosts)
+	}
+
+	if !cfg.CloneAllowFileTransport {
+		t.Errorf("CloneAllowFileTransport = false, want true from CLONE_ALLOW_FILE_URLS=true")
 	}
 }
 
