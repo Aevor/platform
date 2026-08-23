@@ -9,6 +9,7 @@ import (
 
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/github"
+	"github.com/Aevor/platform/services/api/internal/repositories"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/pkg/config"
 	"github.com/Aevor/platform/services/api/pkg/database"
@@ -53,6 +54,13 @@ func main() {
 	)
 	authHandler := auth.NewHandler(authService)
 
+	repositoriesService := repositories.NewService(
+		userService,
+		ghClient,
+		cfg.GitHubTokenEncryptionKey,
+	)
+	repositoriesHandler := repositories.NewHandler(repositoriesService)
+
 	router := gin.New()
 	router.Use(
 		gin.LoggerWithConfig(gin.LoggerConfig{
@@ -81,6 +89,12 @@ func main() {
 		"/users/me",
 		auth.RequireAuth(jwtManager),
 		authHandler.GetMe,
+	)
+
+	router.GET(
+		"/repositories",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.List,
 	)
 
 	log.Printf("server running on :%s", cfg.Port)

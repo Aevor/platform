@@ -19,6 +19,23 @@ type User struct {
 	AvatarURL string `json:"avatar_url"`
 }
 
+type RepositoryOwner struct {
+	Login string `json:"login"`
+}
+
+type Repository struct {
+	ID            int64           `json:"id"`
+	Name          string          `json:"name"`
+	FullName      string          `json:"full_name"`
+	Private       bool            `json:"private"`
+	Description   string          `json:"description"`
+	DefaultBranch string          `json:"default_branch"`
+	Owner         RepositoryOwner `json:"owner"`
+	HTMLURL       string          `json:"html_url"`
+	CloneURL      string          `json:"clone_url"`
+	APIURL        string          `json:"url"`
+}
+
 var (
 	ErrUnauthorized    = errors.New("github_api_unauthorized")
 	ErrRateLimited     = errors.New("github_rate_limited")
@@ -123,6 +140,76 @@ func (c *Client) GetCurrentUser(ctx context.Context, accessToken string) (*User,
 	}
 
 	return &user, nil
+}
+
+// ListUserRepositories returns one page of the repositories accessible to
+// the GitHub account identified by accessToken, via GET /user/repos. page is
+// 1-based; perPage is clamped by the caller. The second return value reports
+// whether GitHub advertises a next page (Link header rel="next").
+func (c *Client) ListUserRepositories(ctx context.Context, accessToken string, page int, perPage int) ([]Repository, bool, error) {
+	endpoint := fmt.Sprintf(
+		"%s/user/repos?sort=full_name&direction=asc&page=%d&per_page=%d",
+		c.baseURL,
+		page,
+		perPage,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, classifyError(resp)
+	}
+
+	var repositories []Repository
+
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize))
+
+	if err := decoder.Decode(&repositories); err != nil {
+		return nil, false, ErrInvalidResponse
+	}
+
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false, ErrInvalidResponse
+	}
+
+	for _, repository := range repositories {
+		if repository.ID <= 0 || strings.TrimSpace(repository.FullName) == "" {
+			return nil, false, ErrInvalidResponse
+		}
+	}
+
+	return repositories, hasNextPage(resp.Header.Get("Link")), nil
+}
+
+// hasNextPage reports whether a GitHub Link header contains a rel="next"
+// entry, e.g. `<https://api.github.com/user/repos?page=2>; rel="next"`.
+func hasNextPage(link string) bool {
+	const marker = `rel="next"`
+
+	for _, segment := range strings.Split(link, ",") {
+		if strings.Contains(segment, marker) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func classifyError(resp *http.Response) error {
