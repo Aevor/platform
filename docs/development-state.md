@@ -5,9 +5,76 @@ NOTE: the canonical project docs live in the `docs` repo at `docs/development-st
 
 ## Branch / baseline
 
-- Working branch: `feat`.
-- Baseline: `6e18c0f` — merged Task 2 implementation plus follow-up PRs #19 (AES-GCM crypto tests), #20 (users service validation tests), #21 (user DTO tests), #22 (health `StatusOK` constant), #23 (github request build error wrapping).
-- Task 1 Parts 1–8 changes are UNCOMMITTED in the working tree. Nothing committed/pushed.
+- Working branch: `feature/github-repositories` (stacked on `fix/users-upsert-token-column`, which is ahead of `main` @ `1040ebc`). Task 2a (`GET /repositories`) AND Task 2b (repository selection) live on the new branch; merge order: fix branch first, then feature. The old local+remote branches `feat` and `backup/wip-feat-668fa85` are STALE.
+
+## Commit ingestion for selected repositories (Task 2e, 2026-08-23)
+
+- NEW endpoint `POST /repositories/:id/commits/sync` (Bearer Aevor JWT): synchronizes Git COMMIT METADATA for one of the authenticated user's selected repositories, mirroring Tasks 2c/2d exactly. Deterministic; no AI/cloning/parsing/indexing/workers.
+- NEW table `repository_commits`: uuid PK; UNIQUE `(selected_repository_id, github_commit_sha varchar(40))` via index `idx_repository_commits_selected_sha`; message (text only — never diffs/file contents); author_name/author_email/author_login/committer_name/html_url/github_authored_at/github_committed_at/synced_at + Aevor timestamps. SHAs normalized lowercase before persistence. GitHub's linked account is OPTIONAL (author email with no GitHub account → empty author_login) — unlike issues/PRs where login is mandatory. `repositories.Migrate` migrates all FOUR models.
+- Client: extended shared client with `ListRepositoryCommits` (GET `/repos/{owner}/{repo}/commits`, authoritative newest-first order); reuses headers/API-version/size-guard/taxonomy/Link-pagination; per-item validation rejects non-hex/short SHAs, blank message/url/author-name, missing dates; 404 → shared `ErrRepositoryNotFound`. BUG FIXED during TDD: GitHub nests `message` under the `commit` key; an initial top-level decode was caught by tests and corrected.
+- Sync: same bounded ≤10 × 100 via generic `collectBoundedPages`; batched ON CONFLICT upsert (target `(selected_repository_id, github_commit_sha)`, assignments pinned in `commitUpsertAssignmentColumns` guarded by `TestUpsertCommits_ColumnsMatchModelSchema`); refresh includes author_login (linked account can appear later). Dedup helper generalized to `dedupByKey[T, K comparable]`, now collapsing duplicate SHAs as well as issue/PR IDs.
+- Security: identical 2c/2d contract — ownership FIRST (unknown ≡ foreign → uniform 404, zero GitHub contact, BEFORE token resolution); authoritative stored metadata for owner/name; decrypted token server-side only; `{repository_id, synced}` response; unchanged error surface.
+- Tests: `client_commits_test.go`; `commits_sync_test.go` (schema regression + full handler matrix incl. cross-user isolation + dedup via pagination + cancelled-context); `repository_commits_integration_test.go` (opt-in real Postgres: uuid preservation on conflict-upsert, linked-account refresh, cross-context SHA independence).
+- Verified 2026-08-23: gofmt/build/vet/test/`-race` green; all four integration tests pass against live PostgreSQL 16; live end-to-end vs local mock GitHub (/commits): exact schema+index after boot; unauth 401; foreign 404 zero contact; rejected-token 401 `github_token_invalid`; happy sync `{synced:3}` with Link page1→page2 using owner's bearer; second sync still 3 rows with newly-linked login refreshed in place; zero token leakage; zero residual DB rows across all five tables.
+
+## Pull-request ingestion for selected repositories (Task 2d, 2026-08-23)
+
+- NEW endpoint `POST /repositories/:id/pull-requests/sync` (Bearer Aevor JWT): synchronizes GitHub PULL REQUEST METADATA for one of the authenticated user's selected repositories, mirroring Task 2c exactly. Deterministic; no AI, no workers, no queues.
+- NEW table `repository_pull_requests`: uuid PK; UNIQUE `(selected_repository_id, github_pull_request_id)` via index `idx_repository_pull_requests_selected_github`; number/title/state/author_login/html_url/head_ref/base_ref/draft/merged/github_created_at/github_updated_at/github_closed_at/github_merged_at/synced_at + Aevor created_at/updated_at. Uniqueness per CONTEXT (same repo selected by two users → independent PR sets). Bodies/diffs NOT persisted (known limitation). `repositories.Migrate` now migrates all three models.
+- Client: extended existing `internal/github.Client` with `ListRepositoryPullRequests` (GET `/repos/{owner}/{repo}/pulls?state=all&sort=updated&direction=desc`); reuses headers/API-version/size-guard/taxonomy/Link-pagination; pulls endpoint returns only PRs (no filtering); validation rejects blank head/base refs and malformed items; 404 → shared `ErrRepositoryNotFound`.
+- Sync: same bounded ≤10 × 100 pagination via shared generic `collectBoundedPages`; single transaction with batched ON CONFLICT upsert (target `(selected_repository_id, github_pull_request_id)`, assignments pinned in `pullRequestUpsertAssignmentColumns` guarded by `TestUpsertPullRequests_ColumnsMatchModelSchema`); re-sync refreshes title/state/branches/draft/merged/merged_at in place.
+- NEW hardening (found live, applies to issues too): `sort=updated` pagination is not snapshot-stable — an item edited mid-sync can appear on two pages, making the single multi-row ON CONFLICT INSERT fail (SQLSTATE 21000 "cannot affect row a second time"). Added generic `dedupByGitHubID` (keeps first occurrence) applied to BOTH issue and PR batches; regression test `TestPRSync_OverlappingPagesDeduplicated`.
+- Security: identical Task 2c contract — ownership FIRST (`FindByUserAndID`, unknown ≡ foreign → uniform 404 `repository_not_found`, zero GitHub contact, BEFORE token resolution); owner/name from stored authoritative metadata; decrypted user token server-side only; response exactly `{repository_id, synced}`; full error surface unchanged.
+- Tests: `client_pull_requests_test.go` (endpoint/query/header shape, mapping incl. draft/head/base/merged_at, Link pagination, status taxonomy, network failure, malformed matrix incl. blank head/base ref, >1MB rejection); `pull_requests_sync_test.go` (schema-consistency regression + handler matrix mirroring 2c incl. cross-user isolation + cancelled-context + dedup); `repository_pull_requests_integration_test.go` (opt-in real Postgres: insert→conflict-upsert preserves uuid while refreshing metadata incl. merged state, cross-context independence, ownership isolation).
+- Verified 2026-08-23: gofmt/build/vet/test/`-race` green; integration passes against live PostgreSQL 16; live end-to-end vs local mock GitHub (/pulls) proved: exact schema+index name after boot, unauth 401, foreign 404 (no mock contact), no-token-user-on-foreign-context 404 (ownership precedes token resolution), garbage-token 401 `github_token_invalid`, happy sync `{synced:3}` following Link page1→page2 with owner's bearer, second sync after upstream retitle+merge `{synced:2}` with SAME rows refreshed in place (uuid preserved), zero token leakage, zero residual DB rows across all four tables, temp helpers removed.
+
+## Issue ingestion for selected repositories (Task 2c, 2026-08-23)
+
+- NEW endpoint `POST /repositories/:id/issues/sync` (Bearer Aevor JWT): synchronizes GitHub issue METADATA for one of the authenticated user's selected repositories. Deterministic; no AI, no workers, no queues.
+- NEW table `repository_issues`: uuid PK; UNIQUE `(selected_repository_id, github_repository-scoped github_issue_id)` via index `idx_repository_issues_selected_github`; number/title/state/author_login/html_url/github_created_at/github_updated_at/github_closed_at/synced_at + Aevor created_at/updated_at. Uniqueness deliberately per CONTEXT (same repo selected by two users → independent issue sets). Bodies NOT persisted yet (known limitation).
+- Client: extended existing `internal/github.Client` with `ListRepositoryIssues` (GET `/repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc`); reuses headers/API-version/size-guard/taxonomy/Link-pagination; PRs filtered out; 404 → shared `ErrRepositoryNotFound`.
+- Sync: bounded ≤10 pages × 100 (`syncPerPage`/`syncMaxPages`), updated-descending; single transaction with batched ON CONFLICT upsert (conflict target `(selected_repository_id, github_issue_id)`, assignments pinned in `issueUpsertAssignmentColumns` guarded by `TestUpsertIssues_ColumnsMatchModelSchema`); store resets input UUIDs to prevent PK collisions across re-syncs; idempotent.
+- Security: ownership resolved FIRST (`Store.FindByUserAndID`, unknown ≡ foreign → uniform 404 `repository_not_found`, zero GitHub contact); owner/name for the GitHub call come from stored authoritative selection metadata; decrypted user token used server-side only; response is exactly `{repository_id, synced}`.
+- Config: optional `GITHUB_API_BASE_URL` override added (empty = production) enabling real-server-vs-mock verification; `.env.example` updated.
+- Verified 2026-08-23: gofmt/build/vet/test/`-race` green; integration tests pass against live PostgreSQL 16 (localhost:5432) incl. uuid preservation on conflict-upsert and cross-context independence; live end-to-end run against a local mock GitHub proved: exact schema+index after boot, unauth 401, foreign 404 (no mock contact), corrupt-ciphertext 500 `internal`, rejected-token 401 `github_token_invalid`, happy sync `{repository_id, synced:3}` with PR filtered + Link pagination followed with the owner's bearer, second sync still 3 rows with title refreshed in place, zero token leakage, zero residual DB rows, temp helpers removed.
+
+## Repository selection + persisted repository context (Task 2b, 2026-08-23)
+
+- NEW endpoints (all Bearer Aevor JWT, identity solely from verified token): `POST /repositories` (`{"github_repository_id":<int>}`), `GET /repositories/selected`, `DELETE /repositories/:id` (Aevor record UUID).
+- Selection flow (service): decrypt authenticated user's stored GitHub token → `github.Client.GetRepository` GET `/repositories/{id}` → 404 maps to 404 `repository_not_found` and NOTHING is persisted; success persists AUTHORITATIVE GitHub metadata into `selected_repositories` bound to the user's Aevor UUID. Re-selection of the same repo UPDATES the existing row in place (never duplicates).
+- NEW table `selected_repositories`: uuid PK, `user_id` + `github_repository_id` with UNIQUE index `idx_selected_repositories_user_repo`, name/full_name/owner_login/private/default_branch/html_url/created_at/updated_at. NO token column — access is re-verified against GitHub at selection time; stored rows are metadata only.
+- Persistence behind a `Store` interface {UpsertSelected/ListByUserID/DeleteByUserAndID} + `gormStore` using `ON CONFLICT (user_id, github_repository_id) DO UPDATE ... RETURNING`; upsert columns pinned in package vars with a schema-consistency regression test (house convention after the Task 1 column bug). Migration = per-package AutoMigrate wired in `cmd/server/main.go`.
+- DELETE semantics: owner → 204; foreign or unknown record → uniform 404 `repository_not_found` (other users' record existence never revealed); malformed UUID → 400 `invalid_request`.
+- Tests: `internal/github/client_repository_test.go` (GetRepository shape/mapping/taxonomy/malformed rejection); `internal/repositories/selection_test.go` (upsert schema consistency + full handler matrix incl. cross-user isolation for the same github_repository_id and decrypted-token-to-GitHub assertion); `internal/repositories/repository_integration_test.go` (opt-in real-Postgres: insert→conflict-update preserves UUID while refreshing metadata; scoped delete; foreign-delete rejected).
+- Verified 2026-08-23: `gofmt -l .` clean; build/vet/test/`-race` all green; integration test PASSES against live PostgreSQL 16 (localhost:5432); live server checks pass — startup created `selected_repositories` with exact schema+index, POST unauth → 401, dummy-token fixture → real GitHub 401 `github_token_invalid` with ZERO rows persisted (access gate proven live), seeded row visible only to owner, foreign DELETE 404, owner DELETE 204, cleanup left 0 residual users/repositories rows.
+
+## GitHub repository discovery (Task 2a, 2026-08-23)
+
+- NEW: authenticated `GET /repositories` — Handler (`internal/repositories/handler.go`) → Service (`service.go`) → existing `internal/github.Client.ListUserRepositories` (GET `/user/repos?sort=full_name&direction=asc&page=&per_page=`, Link-header pagination → `has_more`) → GitHub API.
+- Identity comes ONLY from `RequireAuth` JWT; token retrieval/decryption via new `users.Service.DecryptedGitHubToken` (403 `github_token_missing` when absent; decrypt failure maps to 500 `internal`); GitHub rejecting the stored token maps to 401 `github_token_invalid` (re-login remedy); rate limit surfaces as 429 `github_rate_limited`; all other GitHub failures collapse to 500 `github_unavailable`.
+- Response DTO is field-by-field mapped (id/name/full_name/description/private/default_branch/owner_login/html_url/clone_url/api_url + page/per_page/has_more); plaintext and encrypted tokens are asserted absent from success and error bodies by tests.
+- No persistence added: repositories are fetched live from GitHub per request (discovery first). Pagination params validated (400 `invalid_pagination`), per_page clamped at 100.
+- Verified: full suite green (`go build/vet/test/-race`), live server checks pass (health, unauth 401, missing-token 403, invalid-token 401 via real GitHub), fixture cleanup verified 0 rows.
+- KNOWN ISSUE (deferred, pre-existing): GORM default logger in `pkg/database/postgres.go` logs SQL errors with bound values (incl. ciphertext) to stdout — tighten in a dedicated task.
+- Deferred docs duty: add `GET /repositories` contract to canonical `docs/api-spec.md` once the `docs` repo branch situation (`feat/ai-docs`, untracked state files) is cleaned up.
+
+## Security gate status (verified 2026-08-22)
+
+- FACT: no ref tip tracks `.env`; `.gitignore` covers `.env`/`.env.*` (`check-ignore` confirms).
+- FACT: the leaked commits `b9784cd` and `fd9752c` STILL EXIST and are ancestors of `origin/main` — **git-history purge is NOT done**; secrets remain recoverable from remote history until filter-repo + force-push (owner decision).
+- UNVERIFIABLE locally: GitHub-side OAuth secret revocation/rotation — owner must confirm.
+
+## Broken-functionality repairs (2026-08-22)
+
+- **FACT:** the OAuth re-login upsert column mismatch was LIVE on `main` despite earlier reports of being fixed — no commit on any branch ever contained the correction (`git log --all -S "git_hub_access_token"` empty). `UpsertByGitHubID` referenced nonexistent column `github_access_token` while GORM maps `User.GitHubAccessToken` → `git_hub_access_token`; every repeat login failed with `column excluded.github_access_token does not exist`.
+- FIXED: repository clause corrected + column mapping pinned in the model tag + schema-consistency regression tests (`repository_upsert_test.go`, proven to fail against the old code) + opt-in real-Postgres integration test (`repository_integration_test.go`, gated by `AEVOR_TEST_DATABASE_DSN`) covering insert + conflict-update paths. Integration test PASSES against live PostgreSQL 16 (localhost:5432).
+- FIXED: JWT test time bomb — four tests issued tokens at fixed 2026-08-15 (7-day TTL) and parsed with wall-clock validation, failing permanently from 2026-08-22. `parsedClaims` now uses `jwt.WithoutClaimsValidation()`; validity coverage unchanged.
+- Verified 2026-08-22 (post-review): `gofmt -l .` clean; `go build ./...`, `go vet ./...`, `go test -count=1 ./...`, `go test -race -count=1 ./...` all pass; integration test passes against live PostgreSQL 16 (localhost:5432) leaving schema and existing rows untouched; server boots, `/health` 200, `/auth/github/login` 302 with PKCE S256 params, `/users/me` uniform `401` without JWT; production auth code (`jwt.go`/`middleware.go`) untouched by the branch.
+- Reviewed 2026-08-23 (independent re-review of the whole branch diff): one defect found and fixed — `TestUserModel_TokenColumnNeverSerialized` checked `TagSettings["JSON"]`, which never contains struct `json:` tags (GORM parses only the `gorm:` tag into TagSettings), so it could not fail. It now asserts `field.Tag.Get("json") == "-"`; mutation-tested to FAIL when `json:"-"` is removed. Post-fix: build/vet/test/`-race` green; live integration test green against PostgreSQL 5432 with zero fixture residue; `/health`, login redirect (PKCE S256 + state cookie), `invalid_state` callback mapping, and unauthenticated `/users/me` 401 all verified against a running server; startup AutoMigrate produced no schema change (`git_hub_access_token` column unchanged — no migration required). No secrets in server logs (query strings skipped by gin logger).
+
+## Environment note
+
+- FACT (2026-08-22): local development PostgreSQL 16.15 now runs natively via Homebrew on host port `5432` (db/user/password = `aevor`). The Docker Compose stack on host port `5433` is NOT currently running. `.env` points at `localhost:5432`.
 
 ## Auth & users implementation (Task 1)
 
@@ -44,9 +111,7 @@ GitHub OAuth 2.0 + PKCE login lives in `services/api`:
 
 ### Known gaps / not yet done
 
-- Callback error surface still exposes client codes (`github_api_unauthorized`, `github_rate_limited`, `github_invalid_response`, `github_api_error`) beyond design §6; reconcile during Task 1 close-out.
-- Real-DB integration tests for the upsert path require a running test Postgres (currently covered by fake-repo unit tests).
-- End-to-end `/users/me` verification against the issued JWT still to be exercised manually once credentials are confirmed.
+- Manual end-to-end OAuth RE-LOGIN verification in a real browser (the conflict/update persistence path is proven at DB level; a live second GitHub login still to be exercised by the developer).
 - Token rotation / key-rotation handling is future work.
 
 ## Infrastructure

@@ -12,8 +12,9 @@ import (
 )
 
 var (
-	ErrNotFound       = errors.New("user not found")
-	ErrInvalidProfile = errors.New("invalid github profile")
+	ErrNotFound           = errors.New("user not found")
+	ErrInvalidProfile     = errors.New("invalid github profile")
+	ErrGitHubTokenMissing = errors.New("github access token missing")
 )
 
 type Service struct {
@@ -75,6 +76,24 @@ func (s *Service) GetUserByID(id uuid.UUID) (*User, error) {
 
 func (s *Service) GetUserByGitHubID(githubID int64) (*User, error) {
 	return s.repository.GetByGitHubID(githubID)
+}
+
+// DecryptedGitHubToken returns the plaintext GitHub access token for the user,
+// decrypted with the provided 32-byte key. The token is only ever returned to
+// in-process callers (GitHub API requests); it must never be logged or
+// serialized into a response.
+func (s *Service) DecryptedGitHubToken(id uuid.UUID, encryptionKey []byte) (string, error) {
+	user, err := s.GetUserByID(id)
+
+	if err != nil {
+		return "", err
+	}
+
+	if user.GitHubAccessToken == nil || strings.TrimSpace(*user.GitHubAccessToken) == "" {
+		return "", ErrGitHubTokenMissing
+	}
+
+	return Decrypt(*user.GitHubAccessToken, encryptionKey)
 }
 
 func (s *Service) FindOrCreateByGitHubID(profile github.User, encryptedToken string) (*User, error) {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/github"
+	"github.com/Aevor/platform/services/api/internal/repositories"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/pkg/config"
 	"github.com/Aevor/platform/services/api/pkg/database"
@@ -37,11 +38,24 @@ func main() {
 
 	log.Println("user migration completed")
 
+	log.Println("running selected-repository migrations")
+
+	err = repositories.Migrate(db)
+
+	if err != nil {
+		log.Fatal("failed to migrate selected_repositories table: ", err)
+	}
+
+	log.Println("selected-repository migration completed")
+
 	userRepository := users.NewRepository(db)
 	userService := users.NewService(userRepository)
 
 	oauthConfig := auth.NewGitHubOAuthConfig(cfg)
-	ghClient := github.NewClient(&http.Client{Timeout: 10 * time.Second})
+	ghClient := github.NewClient(
+		&http.Client{Timeout: 10 * time.Second},
+		github.WithBaseURL(cfg.GitHubBaseURL),
+	)
 	jwtManager := auth.NewJWTManager(cfg.JWTSecret)
 
 	authService := auth.NewService(
@@ -52,6 +66,14 @@ func main() {
 		cfg.GitHubTokenEncryptionKey,
 	)
 	authHandler := auth.NewHandler(authService)
+
+	repositoriesService := repositories.NewService(
+		userService,
+		ghClient,
+		repositories.NewStore(db),
+		cfg.GitHubTokenEncryptionKey,
+	)
+	repositoriesHandler := repositories.NewHandler(repositoriesService)
 
 	router := gin.New()
 	router.Use(
@@ -81,6 +103,48 @@ func main() {
 		"/users/me",
 		auth.RequireAuth(jwtManager),
 		authHandler.GetMe,
+	)
+
+	router.GET(
+		"/repositories",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.List,
+	)
+
+	router.POST(
+		"/repositories",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Select,
+	)
+
+	router.GET(
+		"/repositories/selected",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.ListSelected,
+	)
+
+	router.DELETE(
+		"/repositories/:id",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Delete,
+	)
+
+	router.POST(
+		"/repositories/:id/issues/sync",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.SyncIssues,
+	)
+
+	router.POST(
+		"/repositories/:id/pull-requests/sync",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.SyncPullRequests,
+	)
+
+	router.POST(
+		"/repositories/:id/commits/sync",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.SyncCommits,
 	)
 
 	log.Printf("server running on :%s", cfg.Port)

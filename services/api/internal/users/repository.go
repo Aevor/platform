@@ -14,6 +14,23 @@ type Repository interface {
 	UpsertByGitHubID(user *User) error
 }
 
+// upsertConflictColumns is the conflict target for UpsertByGitHubID.
+var upsertConflictColumns = []clause.Column{
+	{Name: "github_id"},
+}
+
+// upsertAssignmentColumns lists the columns refreshed when an existing
+// github_id conflicts. These strings must exactly match the DB column names
+// mapped by the User model (see TestUpsertByGitHubID_ColumnsMatchModelSchema).
+var upsertAssignmentColumns = []string{
+	"username",
+	"display_name",
+	"email",
+	"avatar_url",
+	"git_hub_access_token",
+	"updated_at",
+}
+
 type gormRepository struct {
 	db *gorm.DB
 }
@@ -66,15 +83,8 @@ func (r *gormRepository) UpsertByGitHubID(user *User) error {
 	return r.db.
 		Clauses(
 			clause.OnConflict{
-				Columns: []clause.Column{{Name: "github_id"}},
-				DoUpdates: clause.AssignmentColumns([]string{
-					"username",
-					"display_name",
-					"email",
-					"avatar_url",
-					"github_access_token",
-					"updated_at",
-				}),
+				Columns:   upsertConflictColumns,
+				DoUpdates: clause.AssignmentColumns(upsertAssignmentColumns),
 			},
 			clause.Returning{},
 		).

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -19,13 +20,57 @@ type User struct {
 	AvatarURL string `json:"avatar_url"`
 }
 
+type RepositoryOwner struct {
+	Login string `json:"login"`
+}
+
+type Repository struct {
+	ID            int64           `json:"id"`
+	Name          string          `json:"name"`
+	FullName      string          `json:"full_name"`
+	Private       bool            `json:"private"`
+	Description   string          `json:"description"`
+	DefaultBranch string          `json:"default_branch"`
+	Owner         RepositoryOwner `json:"owner"`
+	HTMLURL       string          `json:"html_url"`
+	CloneURL      string          `json:"clone_url"`
+	APIURL        string          `json:"url"`
+}
+
 var (
 	ErrUnauthorized    = errors.New("github_api_unauthorized")
 	ErrRateLimited     = errors.New("github_rate_limited")
 	ErrUnavailable     = errors.New("github_unavailable")
 	ErrInvalidResponse = errors.New("github_invalid_response")
 	ErrAPIError        = errors.New("github_api_error")
+	//
+	ErrRepositoryNotFound = errors.New("github_repository_not_found")
 )
+
+// IssueAuthor is the author (`user`) object embedded in GitHub issue payloads.
+type IssueAuthor struct {
+	Login string `json:"login"`
+}
+
+// Issue is the Aevor view of a GitHub issue. The body is deliberately NOT
+// decoded: V1 synchronization persists metadata only, and skipping the field
+// keeps oversized bodies from consuming the response-size budget.
+type Issue struct {
+	ID        int64       `json:"id"`
+	Number    int         `json:"number"`
+	Title     string      `json:"title"`
+	State     string      `json:"state"`
+	User      IssueAuthor `json:"user"`
+	HTMLURL   string      `json:"html_url"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
+	ClosedAt  *time.Time  `json:"closed_at"`
+
+	// PullRequest is non-nil when the entry is actually a pull request —
+	// GitHub's issues endpoints include PRs in their responses. Such entries
+	// are filtered out before validation.
+	PullRequest *struct{} `json:"pull_request,omitempty"`
+}
 
 const (
 	defaultBaseURL   = "https://api.github.com"
@@ -123,6 +168,471 @@ func (c *Client) GetCurrentUser(ctx context.Context, accessToken string) (*User,
 	}
 
 	return &user, nil
+}
+
+// ListUserRepositories returns one page of the repositories accessible to
+// the GitHub account identified by accessToken, via GET /user/repos. page is
+// 1-based; perPage is clamped by the caller. The second return value reports
+// whether GitHub advertises a next page (Link header rel="next").
+func (c *Client) ListUserRepositories(ctx context.Context, accessToken string, page int, perPage int) ([]Repository, bool, error) {
+	endpoint := fmt.Sprintf(
+		"%s/user/repos?sort=full_name&direction=asc&page=%d&per_page=%d",
+		c.baseURL,
+		page,
+		perPage,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, classifyError(resp)
+	}
+
+	var repositories []Repository
+
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize))
+
+	if err := decoder.Decode(&repositories); err != nil {
+		return nil, false, ErrInvalidResponse
+	}
+
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false, ErrInvalidResponse
+	}
+
+	for _, repository := range repositories {
+		if repository.ID <= 0 || strings.TrimSpace(repository.FullName) == "" {
+			return nil, false, ErrInvalidResponse
+		}
+	}
+
+	return repositories, hasNextPage(resp.Header.Get("Link")), nil
+}
+
+// GetRepository fetches the authoritative GitHub repository metadata by
+// numeric repository ID, using the given user's access token. A 404 means the
+// repository does not exist OR is not visible to that account — both collapse
+// to ErrRepositoryNotFound so callers can never persist a repository the
+// authenticated user cannot access.
+func (c *Client) GetRepository(ctx context.Context, accessToken string, githubRepositoryID int64) (*Repository, error) {
+	endpoint := fmt.Sprintf("%s/repositories/%d", c.baseURL, githubRepositoryID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrRepositoryNotFound
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, classifyError(resp)
+	}
+
+	var repository Repository
+
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize))
+
+	if err := decoder.Decode(&repository); err != nil {
+		return nil, ErrInvalidResponse
+	}
+
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, ErrInvalidResponse
+	}
+
+	if repository.ID <= 0 || strings.TrimSpace(repository.FullName) == "" {
+		return nil, ErrInvalidResponse
+	}
+
+	return &repository, nil
+}
+
+// ListRepositoryIssues returns one page of issues (metadata only) for the
+// given repository, via GET /repos/{owner}/{repo}/issues with state=all and
+// deterministic updated-descending order. Pull-request entries that GitHub
+// includes in the response are filtered out. page is 1-based; perPage is
+// clamped by the caller. The second return value reports whether GitHub
+// advertises a next page (Link header rel="next"). A 404 means the repository
+// does not exist, was renamed, or is not visible to this account — it maps to
+// ErrRepositoryNotFound so callers can react uniformly.
+func (c *Client) ListRepositoryIssues(
+	ctx context.Context,
+	accessToken string,
+	owner string,
+	repository string,
+	page int,
+	perPage int,
+) ([]Issue, bool, error) {
+	endpoint := fmt.Sprintf(
+		"%s/repos/%s/%s/issues?state=all&sort=updated&direction=desc&page=%d&per_page=%d",
+		c.baseURL,
+		url.PathEscape(owner),
+		url.PathEscape(repository),
+		page,
+		perPage,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, ErrRepositoryNotFound
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, classifyError(resp)
+	}
+
+	var issues []Issue
+
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize))
+
+	if err := decoder.Decode(&issues); err != nil {
+		return nil, false, ErrInvalidResponse
+	}
+
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false, ErrInvalidResponse
+	}
+
+	valid := make([]Issue, 0, len(issues))
+
+	for _, issue := range issues {
+		// Pull requests are not issues for Aevor's purposes.
+		if issue.PullRequest != nil {
+			continue
+		}
+
+		state := strings.TrimSpace(issue.State)
+
+		if issue.ID <= 0 || issue.Number <= 0 ||
+			strings.TrimSpace(issue.Title) == "" ||
+			strings.TrimSpace(issue.User.Login) == "" ||
+			strings.TrimSpace(issue.HTMLURL) == "" ||
+			issue.CreatedAt.IsZero() ||
+			(state != "open" && state != "closed") {
+			return nil, false, ErrInvalidResponse
+		}
+
+		valid = append(valid, issue)
+	}
+
+	return valid, hasNextPage(resp.Header.Get("Link")), nil
+}
+
+// PullRequestRef is the minimal view of a PR head/base object: only the
+// branch name is meaningful to Aevor's metadata model.
+type PullRequestRef struct {
+	Ref string `json:"ref"`
+}
+
+// PullRequest is the Aevor view of a GitHub pull request. Like Issue, the
+// body is deliberately NOT decoded: V1 synchronization persists metadata
+// only, and skipping the field keeps oversized bodies from consuming the
+// response-size budget.
+type PullRequest struct {
+	ID        int64          `json:"id"`
+	Number    int            `json:"number"`
+	Title     string         `json:"title"`
+	State     string         `json:"state"`
+	User      IssueAuthor    `json:"user"`
+	HTMLURL   string         `json:"html_url"`
+	Head      PullRequestRef `json:"head"`
+	Base      PullRequestRef `json:"base"`
+	Draft     bool           `json:"draft"`
+	Merged    bool           `json:"merged"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	ClosedAt  *time.Time     `json:"closed_at"`
+	MergedAt  *time.Time     `json:"merged_at"`
+}
+
+// ListRepositoryPullRequests returns one page of pull requests (metadata
+// only) for the given repository, via GET /repos/{owner}/{repo}/pulls with
+// state=all and deterministic updated-descending order. Unlike the issues
+// endpoint, this endpoint contains no non-PR entries, so no filtering is
+// required. page is 1-based; perPage is clamped by the caller. The second
+// return value reports whether GitHub advertises a next page (Link header
+// rel="next"). A 404 means the repository does not exist, was renamed, or is
+// not visible to this account — it maps to ErrRepositoryNotFound so callers
+// can react uniformly.
+func (c *Client) ListRepositoryPullRequests(
+	ctx context.Context,
+	accessToken string,
+	owner string,
+	repository string,
+	page int,
+	perPage int,
+) ([]PullRequest, bool, error) {
+	endpoint := fmt.Sprintf(
+		"%s/repos/%s/%s/pulls?state=all&sort=updated&direction=desc&page=%d&per_page=%d",
+		c.baseURL,
+		url.PathEscape(owner),
+		url.PathEscape(repository),
+		page,
+		perPage,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, ErrRepositoryNotFound
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, classifyError(resp)
+	}
+
+	var pullRequests []PullRequest
+
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize))
+
+	if err := decoder.Decode(&pullRequests); err != nil {
+		return nil, false, ErrInvalidResponse
+	}
+
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false, ErrInvalidResponse
+	}
+
+	for _, pullRequest := range pullRequests {
+		state := strings.TrimSpace(pullRequest.State)
+
+		if pullRequest.ID <= 0 || pullRequest.Number <= 0 ||
+			strings.TrimSpace(pullRequest.Title) == "" ||
+			strings.TrimSpace(pullRequest.User.Login) == "" ||
+			strings.TrimSpace(pullRequest.HTMLURL) == "" ||
+			pullRequest.CreatedAt.IsZero() ||
+			strings.TrimSpace(pullRequest.Head.Ref) == "" ||
+			strings.TrimSpace(pullRequest.Base.Ref) == "" ||
+			(state != "open" && state != "closed") {
+			return nil, false, ErrInvalidResponse
+		}
+	}
+
+	return pullRequests, hasNextPage(resp.Header.Get("Link")), nil
+}
+
+// CommitIdentity is the minimal view of a Git author/committer inside a
+// commit's `commit` object. Emails are stored for evidence purposes only —
+// Aevor never uses them as identity keys.
+type CommitIdentity struct {
+	Name  string    `json:"name"`
+	Email string    `json:"email"`
+	Date  time.Time `json:"date"`
+}
+
+// CommitAuthor is the optional GitHub ACCOUNT linked to a commit. It is null
+// on GitHub when the commit email matches no account, so both occurrences are
+// pointers and Login is treated as optional downstream.
+type CommitAuthor struct {
+	Login string `json:"login"`
+}
+
+// Commit is the Aevor view of one Git commit. The tree/parent/verification
+// structures are deliberately NOT decoded: V1 persists metadata only, and
+// skipping them keeps the response-size budget for actual list content. The
+// SHA is the natural unique identifier within a repository.
+type Commit struct {
+	SHA     string `json:"sha"`
+	HTMLURL string `json:"html_url"`
+
+	// The Git-level payload (message, author, committer) lives under the
+	// `commit` key in GitHub's API.
+	Commit struct {
+		Message   string         `json:"message"`
+		Author    CommitIdentity `json:"author"`
+		Committer CommitIdentity `json:"committer"`
+	} `json:"commit"`
+
+	Author    *CommitAuthor `json:"author"`
+	Committer *CommitAuthor `json:"committer"`
+}
+
+// ListRepositoryCommits returns one page of commits for the given repository,
+// via GET /repos/{owner}/{repo}/commits in GitHub's authoritative default
+// order (newest first on the default branch). page is 1-based; perPage is
+// clamped by the caller. The second return value reports whether GitHub
+// advertises a next page (Link header rel="next"). SHAs are normalized to
+// lowercase. Per-item validation rejects malformed entries wholesale
+// (ErrInvalidResponse): invalid SHAs, blank messages/URLs/author names, or
+// missing dates. A 404 means the repository does not exist, was renamed, or
+// is not visible to this account — it maps to ErrRepositoryNotFound so
+// callers can react uniformly.
+func (c *Client) ListRepositoryCommits(
+	ctx context.Context,
+	accessToken string,
+	owner string,
+	repository string,
+	page int,
+	perPage int,
+) ([]Commit, bool, error) {
+	endpoint := fmt.Sprintf(
+		"%s/repos/%s/%s/commits?page=%d&per_page=%d",
+		c.baseURL,
+		url.PathEscape(owner),
+		url.PathEscape(repository),
+		page,
+		perPage,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, ErrRepositoryNotFound
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, classifyError(resp)
+	}
+
+	var commits []Commit
+
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize))
+
+	if err := decoder.Decode(&commits); err != nil {
+		return nil, false, ErrInvalidResponse
+	}
+
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false, ErrInvalidResponse
+	}
+
+	for _, commit := range commits {
+		if !isCommitSHAShape(commit.SHA) ||
+			strings.TrimSpace(commit.Commit.Message) == "" ||
+			strings.TrimSpace(commit.HTMLURL) == "" ||
+			strings.TrimSpace(commit.Commit.Author.Name) == "" ||
+			commit.Commit.Author.Date.IsZero() ||
+			commit.Commit.Committer.Date.IsZero() {
+			return nil, false, ErrInvalidResponse
+		}
+	}
+
+	return normalizeCommitSHAs(commits), hasNextPage(resp.Header.Get("Link")), nil
+}
+
+// isCommitSHAShape reports whether s looks like a full git SHA-1: exactly 40
+// hexadecimal characters.
+func isCommitSHAShape(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+			return false
+		}
+	}
+
+	return true
+}
+
+// normalizeCommitSHAs lowercases every SHA so persistence can rely on one
+// canonical form regardless of how GitHub formatted the response.
+func normalizeCommitSHAs(commits []Commit) []Commit {
+	for i := range commits {
+		commits[i].SHA = strings.ToLower(commits[i].SHA)
+	}
+
+	return commits
+}
+
+// hasNextPage reports whether a GitHub Link header contains a rel="next"
+// entry, e.g. `<https://api.github.com/user/repos?page=2>; rel="next"`.
+func hasNextPage(link string) bool {
+	const marker = `rel="next"`
+
+	for _, segment := range strings.Split(link, ",") {
+		if strings.Contains(segment, marker) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func classifyError(resp *http.Response) error {
