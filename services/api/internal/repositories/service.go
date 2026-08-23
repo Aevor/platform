@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -114,4 +115,102 @@ func (s *Service) ListSelected(userID uuid.UUID) ([]SelectedRepository, error) {
 // IDs and other users' IDs are indistinguishable by design.
 func (s *Service) RemoveSelected(userID uuid.UUID, id uuid.UUID) error {
 	return s.store.DeleteByUserAndID(userID, id)
+}
+
+const (
+	// syncPerPage is GitHub's maximum page size: fewer requests per sync.
+	syncPerPage = 100
+
+	// syncMaxPages bounds a single synchronous synchronization to a
+	// deterministic amount of work (currently <= 1000 issues). Repositories
+	// with more history simply sync their most recently updated issues first;
+	// deeper backfill can revisit later without any duplicate risk.
+	syncMaxPages = 10
+)
+
+// SyncResult summarizes one synchronization run. It deliberately contains no
+// GitHub payload material — only Aevor identifiers and counts.
+type SyncResult struct {
+	RepositoryID string `json:"repository_id"`
+	Synced       int    `json:"synced"`
+}
+
+// SyncIssues synchronizes issue metadata for ONE of the authenticated user's
+// selected repositories. Ownership is resolved through the JWT-derived userID:
+// unknown and foreign selected-repository IDs are indistinguishable
+// (ErrSelectedNotFound). The owner/name pair used against GitHub comes from
+// OUR stored authoritative metadata (captured at selection time with the
+// user's own token) — a client can never redirect the sync at another
+// repository.
+func (s *Service) SyncIssues(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) (*SyncResult, error) {
+	selected, err := s.store.FindByUserAndID(userID, selectedRepositoryID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	token, err := s.users.DecryptedGitHubToken(userID, s.encryptionKey)
+
+	if err != nil {
+		return nil, err
+	}
+
+	collected := make([]github.Issue, 0)
+
+	for page := 1; page <= syncMaxPages; page++ {
+		issues, hasMore, err := s.github.ListRepositoryIssues(
+			ctx,
+			token,
+			selected.OwnerLogin,
+			selected.Name,
+			page,
+			syncPerPage,
+		)
+
+		if err != nil {
+			log.Printf("github issue list failed for user %s repository %s page %d: %v",
+				userID, selected.ID, page, err)
+			return nil, err
+		}
+
+		collected = append(collected, issues...)
+
+		if !hasMore {
+			break
+		}
+	}
+
+	rows := make([]RepositoryIssue, 0, len(collected))
+
+	now := time.Now()
+
+	for _, issue := range collected {
+		rows = append(rows, RepositoryIssue{
+			SelectedRepositoryID: selected.ID,
+			GithubIssueID:        issue.ID,
+			Number:               issue.Number,
+			Title:                issue.Title,
+			State:                issue.State,
+			AuthorLogin:          issue.User.Login,
+			HTMLURL:              issue.HTMLURL,
+			GithubCreatedAt:      issue.CreatedAt,
+			GithubUpdatedAt:      issue.UpdatedAt,
+			GithubClosedAt:       issue.ClosedAt,
+			SyncedAt:             now,
+		})
+	}
+
+	if err := s.store.UpsertIssues(selected.ID, rows); err != nil {
+		log.Printf("issue persistence failed for user %s repository %s: %v", userID, selected.ID, err)
+		return nil, err
+	}
+
+	return &SyncResult{
+		RepositoryID: selected.ID.String(),
+		Synced:       len(rows),
+	}, nil
 }

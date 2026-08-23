@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -45,6 +46,31 @@ var (
 	//
 	ErrRepositoryNotFound = errors.New("github_repository_not_found")
 )
+
+// IssueAuthor is the author (`user`) object embedded in GitHub issue payloads.
+type IssueAuthor struct {
+	Login string `json:"login"`
+}
+
+// Issue is the Aevor view of a GitHub issue. The body is deliberately NOT
+// decoded: V1 synchronization persists metadata only, and skipping the field
+// keeps oversized bodies from consuming the response-size budget.
+type Issue struct {
+	ID        int64       `json:"id"`
+	Number    int         `json:"number"`
+	Title     string      `json:"title"`
+	State     string      `json:"state"`
+	User      IssueAuthor `json:"user"`
+	HTMLURL   string      `json:"html_url"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
+	ClosedAt  *time.Time  `json:"closed_at"`
+
+	// PullRequest is non-nil when the entry is actually a pull request —
+	// GitHub's issues endpoints include PRs in their responses. Such entries
+	// are filtered out before validation.
+	PullRequest *struct{} `json:"pull_request,omitempty"`
+}
 
 const (
 	defaultBaseURL   = "https://api.github.com"
@@ -252,6 +278,95 @@ func (c *Client) GetRepository(ctx context.Context, accessToken string, githubRe
 	}
 
 	return &repository, nil
+}
+
+// ListRepositoryIssues returns one page of issues (metadata only) for the
+// given repository, via GET /repos/{owner}/{repo}/issues with state=all and
+// deterministic updated-descending order. Pull-request entries that GitHub
+// includes in the response are filtered out. page is 1-based; perPage is
+// clamped by the caller. The second return value reports whether GitHub
+// advertises a next page (Link header rel="next"). A 404 means the repository
+// does not exist, was renamed, or is not visible to this account — it maps to
+// ErrRepositoryNotFound so callers can react uniformly.
+func (c *Client) ListRepositoryIssues(
+	ctx context.Context,
+	accessToken string,
+	owner string,
+	repository string,
+	page int,
+	perPage int,
+) ([]Issue, bool, error) {
+	endpoint := fmt.Sprintf(
+		"%s/repos/%s/%s/issues?state=all&sort=updated&direction=desc&page=%d&per_page=%d",
+		c.baseURL,
+		url.PathEscape(owner),
+		url.PathEscape(repository),
+		page,
+		perPage,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, ErrRepositoryNotFound
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, classifyError(resp)
+	}
+
+	var issues []Issue
+
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize))
+
+	if err := decoder.Decode(&issues); err != nil {
+		return nil, false, ErrInvalidResponse
+	}
+
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false, ErrInvalidResponse
+	}
+
+	valid := make([]Issue, 0, len(issues))
+
+	for _, issue := range issues {
+		// Pull requests are not issues for Aevor's purposes.
+		if issue.PullRequest != nil {
+			continue
+		}
+
+		state := strings.TrimSpace(issue.State)
+
+		if issue.ID <= 0 || issue.Number <= 0 ||
+			strings.TrimSpace(issue.Title) == "" ||
+			strings.TrimSpace(issue.User.Login) == "" ||
+			strings.TrimSpace(issue.HTMLURL) == "" ||
+			issue.CreatedAt.IsZero() ||
+			(state != "open" && state != "closed") {
+			return nil, false, ErrInvalidResponse
+		}
+
+		valid = append(valid, issue)
+	}
+
+	return valid, hasNextPage(resp.Header.Get("Link")), nil
 }
 
 // hasNextPage reports whether a GitHub Link header contains a rel="next"

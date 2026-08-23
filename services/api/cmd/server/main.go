@@ -52,7 +52,10 @@ func main() {
 	userService := users.NewService(userRepository)
 
 	oauthConfig := auth.NewGitHubOAuthConfig(cfg)
-	ghClient := github.NewClient(&http.Client{Timeout: 10 * time.Second})
+	ghClient := github.NewClient(
+		&http.Client{Timeout: 10 * time.Second},
+		github.WithBaseURL(cfg.GitHubBaseURL),
+	)
 	jwtManager := auth.NewJWTManager(cfg.JWTSecret)
 
 	authService := auth.NewService(
@@ -124,6 +127,12 @@ func main() {
 		"/repositories/:id",
 		auth.RequireAuth(jwtManager),
 		repositoriesHandler.Delete,
+	)
+
+	router.POST(
+		"/repositories/:id/issues/sync",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.SyncIssues,
 	)
 
 	log.Printf("server running on :%s", cfg.Port)

@@ -44,3 +44,53 @@ func (r *SelectedRepository) BeforeCreate(tx *gorm.DB) error {
 
 	return nil
 }
+
+// RepositoryIssue is the persisted Aevor metadata for one GitHub issue
+// belonging to ONE selected-repository context. The same GitHub issue can be
+// synced under multiple users' contexts for the same repository — uniqueness
+// is deliberately scoped to (selected_repository_id, github_issue_id),
+// mirroring the per-user ownership model of selected_repositories. Issue
+// bodies are intentionally NOT persisted yet (documented limitation; additive
+// to introduce later). GitHub timestamps are kept under a Github* prefix so
+// they are never confused with the Aevor row timestamps.
+type RepositoryIssue struct {
+	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+
+	SelectedRepositoryID uuid.UUID `gorm:"type:uuid;uniqueIndex:idx_repository_issues_selected_github;not null" json:"-"`
+
+	GithubIssueID int64 `gorm:"uniqueIndex:idx_repository_issues_selected_github;not null" json:"github_issue_id"`
+
+	Number int    `gorm:"not null" json:"number"`
+	Title  string `gorm:"type:text;not null" json:"title"`
+
+	State string `gorm:"size:16;not null" json:"state"`
+
+	AuthorLogin string `gorm:"size:255;not null" json:"author_login"`
+
+	HTMLURL string `gorm:"type:text" json:"html_url"`
+
+	GithubCreatedAt time.Time  `json:"github_created_at"`
+	GithubUpdatedAt time.Time  `json:"github_updated_at"`
+	GithubClosedAt  *time.Time `json:"github_closed_at"`
+
+	SyncedAt time.Time `json:"synced_at"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (i *RepositoryIssue) TableName() string {
+	return "repository_issues"
+}
+
+func (i *RepositoryIssue) BeforeCreate(tx *gorm.DB) error {
+	if i.ID == uuid.Nil {
+		i.ID = uuid.New()
+	}
+
+	if i.SyncedAt.IsZero() {
+		i.SyncedAt = time.Now()
+	}
+
+	return nil
+}

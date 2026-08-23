@@ -261,3 +261,76 @@ func (h *Handler) Delete(
 
 	c.Status(http.StatusNoContent)
 }
+
+// SyncIssues handles POST /repositories/:id/issues/sync where :id is the
+// authenticated user's Aevor selected-repository UUID. The GitHub repository,
+// credentials, and ownership are all resolved server-side; the client names
+// nothing but its own verified identity.
+func (h *Handler) SyncIssues(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	result, err := h.service.SyncIssues(c.Request.Context(), userID, id)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			// Unknown AND foreign records map identically: existence of
+			// another user's repository context is never revealed.
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, users.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found",
+			})
+		case errors.Is(err, users.ErrGitHubTokenMissing):
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "github_token_missing",
+			})
+		case errors.Is(err, github.ErrRepositoryNotFound):
+			// Repository deleted/renamed on GitHub since selection.
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, github.ErrUnauthorized):
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "github_token_invalid",
+			})
+		case errors.Is(err, github.ErrRateLimited):
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": "github_rate_limited",
+			})
+		case errors.Is(err, github.ErrUnavailable),
+			errors.Is(err, github.ErrInvalidResponse),
+			errors.Is(err, github.ErrAPIError):
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "github_unavailable",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}

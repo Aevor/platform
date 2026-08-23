@@ -21,6 +21,10 @@ type AppConfig struct {
 	GitHubClientID     string
 	GitHubClientSecret string
 	GitHubRedirectURL  string
+	// GitHubBaseURL optionally overrides the GitHub REST API base URL
+	// (GITHUB_API_BASE_URL). Empty means the production default. Used for
+	// integration testing against a local mock GitHub.
+	GitHubBaseURL string
 
 	JWTSecret []byte
 
@@ -47,6 +51,7 @@ func Load() (*AppConfig, error) {
 		GitHubClientID:           os.Getenv("GITHUB_CLIENT_ID"),
 		GitHubClientSecret:       os.Getenv("GITHUB_CLIENT_SECRET"),
 		GitHubRedirectURL:        os.Getenv("GITHUB_REDIRECT_URL"),
+		GitHubBaseURL:            os.Getenv("GITHUB_API_BASE_URL"),
 		JWTSecret:                []byte(os.Getenv("JWT_SECRET")),
 		GitHubTokenEncryptionKey: encryptionKey,
 	}

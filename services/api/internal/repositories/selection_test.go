@@ -21,11 +21,18 @@ import (
 type fakeStore struct {
 	mu   sync.Mutex
 	rows map[uuid.UUID]SelectedRepository
-
+	// issues emulates the (selected_repository_id, github_issue_id) unique
+	// constraint of repository_issues: key is that composite pair.
+	issues    map[issueKey]RepositoryIssue
 	upserts   int
 	deletes   int
 	upsertErr error
 	deleteErr error
+}
+
+type issueKey struct {
+	selectedRepositoryID uuid.UUID
+	githubIssueID        int64
 }
 
 func (f *fakeStore) UpsertSelected(repository *SelectedRepository) error {
@@ -95,6 +102,43 @@ func (f *fakeStore) DeleteByUserAndID(userID uuid.UUID, id uuid.UUID) error {
 	}
 
 	delete(f.rows, id)
+
+	return nil
+}
+
+func (f *fakeStore) FindByUserAndID(userID uuid.UUID, id uuid.UUID) (*SelectedRepository, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	row, ok := f.rows[id]
+
+	if !ok || row.UserID != userID {
+		return nil, ErrSelectedNotFound
+	}
+
+	return &row, nil
+}
+
+func (f *fakeStore) UpsertIssues(selectedRepositoryID uuid.UUID, issues []RepositoryIssue) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i := range issues {
+		issues[i].SelectedRepositoryID = selectedRepositoryID
+		issues[i].ID = uuid.Nil
+
+		key := issueKey{selectedRepositoryID, issues[i].GithubIssueID}
+
+		if existing, ok := f.issues[key]; ok {
+			issues[i].ID = existing.ID
+			issues[i].CreatedAt = existing.CreatedAt
+		} else {
+			issues[i].ID = uuid.New()
+			issues[i].CreatedAt = time.Now()
+		}
+
+		f.issues[key] = issues[i]
+	}
 
 	return nil
 }
@@ -588,7 +632,7 @@ func TestDelete_RemovesOwnRecordOnly(t *testing.T) {
 }
 
 func TestService_UpsertRefreshesMetadataOnDuplicateSelection(t *testing.T) {
-	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository)}
+	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository), issues: make(map[issueKey]RepositoryIssue)}
 
 	first := &SelectedRepository{UserID: uuid.New(), GithubRepositoryID: 42, Name: "old-name"}
 
@@ -619,7 +663,7 @@ func TestService_UpsertRefreshesMetadataOnDuplicateSelection(t *testing.T) {
 }
 
 func TestStore_DeleteUnknownReturnsSentinel(t *testing.T) {
-	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository)}
+	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository), issues: make(map[issueKey]RepositoryIssue)}
 
 	err := store.DeleteByUserAndID(uuid.New(), uuid.New())
 

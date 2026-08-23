@@ -137,7 +137,7 @@ func newListFixture(
 
 	client := github.NewClient(nil, github.WithBaseURL(githubMock.URL))
 
-	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository)}
+	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository), issues: make(map[issueKey]RepositoryIssue)}
 
 	service := NewService(userService, client, store, testEncryptionKey())
 
