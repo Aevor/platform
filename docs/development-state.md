@@ -7,6 +7,16 @@ NOTE: the canonical project docs live in the `docs` repo at `docs/development-st
 
 - Working branch: `feature/github-repositories` (stacked on `fix/users-upsert-token-column`, which is ahead of `main` @ `1040ebc`). Task 2a (`GET /repositories`) AND Task 2b (repository selection) live on the new branch; merge order: fix branch first, then feature. The old local+remote branches `feat` and `backup/wip-feat-668fa85` are STALE.
 
+## Issue ingestion for selected repositories (Task 2c, 2026-08-23)
+
+- NEW endpoint `POST /repositories/:id/issues/sync` (Bearer Aevor JWT): synchronizes GitHub issue METADATA for one of the authenticated user's selected repositories. Deterministic; no AI, no workers, no queues.
+- NEW table `repository_issues`: uuid PK; UNIQUE `(selected_repository_id, github_repository-scoped github_issue_id)` via index `idx_repository_issues_selected_github`; number/title/state/author_login/html_url/github_created_at/github_updated_at/github_closed_at/synced_at + Aevor created_at/updated_at. Uniqueness deliberately per CONTEXT (same repo selected by two users → independent issue sets). Bodies NOT persisted yet (known limitation).
+- Client: extended existing `internal/github.Client` with `ListRepositoryIssues` (GET `/repos/{owner}/{repo}/issues?state=all&sort=updated&direction=desc`); reuses headers/API-version/size-guard/taxonomy/Link-pagination; PRs filtered out; 404 → shared `ErrRepositoryNotFound`.
+- Sync: bounded ≤10 pages × 100 (`syncPerPage`/`syncMaxPages`), updated-descending; single transaction with batched ON CONFLICT upsert (conflict target `(selected_repository_id, github_issue_id)`, assignments pinned in `issueUpsertAssignmentColumns` guarded by `TestUpsertIssues_ColumnsMatchModelSchema`); store resets input UUIDs to prevent PK collisions across re-syncs; idempotent.
+- Security: ownership resolved FIRST (`Store.FindByUserAndID`, unknown ≡ foreign → uniform 404 `repository_not_found`, zero GitHub contact); owner/name for the GitHub call come from stored authoritative selection metadata; decrypted user token used server-side only; response is exactly `{repository_id, synced}`.
+- Config: optional `GITHUB_API_BASE_URL` override added (empty = production) enabling real-server-vs-mock verification; `.env.example` updated.
+- Verified 2026-08-23: gofmt/build/vet/test/`-race` green; integration tests pass against live PostgreSQL 16 (localhost:5432) incl. uuid preservation on conflict-upsert and cross-context independence; live end-to-end run against a local mock GitHub proved: exact schema+index after boot, unauth 401, foreign 404 (no mock contact), corrupt-ciphertext 500 `internal`, rejected-token 401 `github_token_invalid`, happy sync `{repository_id, synced:3}` with PR filtered + Link pagination followed with the owner's bearer, second sync still 3 rows with title refreshed in place, zero token leakage, zero residual DB rows, temp helpers removed.
+
 ## Repository selection + persisted repository context (Task 2b, 2026-08-23)
 
 - NEW endpoints (all Bearer Aevor JWT, identity solely from verified token): `POST /repositories` (`{"github_repository_id":<int>}`), `GET /repositories/selected`, `DELETE /repositories/:id` (Aevor record UUID).
