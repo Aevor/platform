@@ -369,6 +369,116 @@ func (c *Client) ListRepositoryIssues(
 	return valid, hasNextPage(resp.Header.Get("Link")), nil
 }
 
+// PullRequestRef is the minimal view of a PR head/base object: only the
+// branch name is meaningful to Aevor's metadata model.
+type PullRequestRef struct {
+	Ref string `json:"ref"`
+}
+
+// PullRequest is the Aevor view of a GitHub pull request. Like Issue, the
+// body is deliberately NOT decoded: V1 synchronization persists metadata
+// only, and skipping the field keeps oversized bodies from consuming the
+// response-size budget.
+type PullRequest struct {
+	ID        int64          `json:"id"`
+	Number    int            `json:"number"`
+	Title     string         `json:"title"`
+	State     string         `json:"state"`
+	User      IssueAuthor    `json:"user"`
+	HTMLURL   string         `json:"html_url"`
+	Head      PullRequestRef `json:"head"`
+	Base      PullRequestRef `json:"base"`
+	Draft     bool           `json:"draft"`
+	Merged    bool           `json:"merged"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	ClosedAt  *time.Time     `json:"closed_at"`
+	MergedAt  *time.Time     `json:"merged_at"`
+}
+
+// ListRepositoryPullRequests returns one page of pull requests (metadata
+// only) for the given repository, via GET /repos/{owner}/{repo}/pulls with
+// state=all and deterministic updated-descending order. Unlike the issues
+// endpoint, this endpoint contains no non-PR entries, so no filtering is
+// required. page is 1-based; perPage is clamped by the caller. The second
+// return value reports whether GitHub advertises a next page (Link header
+// rel="next"). A 404 means the repository does not exist, was renamed, or is
+// not visible to this account — it maps to ErrRepositoryNotFound so callers
+// can react uniformly.
+func (c *Client) ListRepositoryPullRequests(
+	ctx context.Context,
+	accessToken string,
+	owner string,
+	repository string,
+	page int,
+	perPage int,
+) ([]PullRequest, bool, error) {
+	endpoint := fmt.Sprintf(
+		"%s/repos/%s/%s/pulls?state=all&sort=updated&direction=desc&page=%d&per_page=%d",
+		c.baseURL,
+		url.PathEscape(owner),
+		url.PathEscape(repository),
+		page,
+		perPage,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, ErrRepositoryNotFound
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, classifyError(resp)
+	}
+
+	var pullRequests []PullRequest
+
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize))
+
+	if err := decoder.Decode(&pullRequests); err != nil {
+		return nil, false, ErrInvalidResponse
+	}
+
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false, ErrInvalidResponse
+	}
+
+	for _, pullRequest := range pullRequests {
+		state := strings.TrimSpace(pullRequest.State)
+
+		if pullRequest.ID <= 0 || pullRequest.Number <= 0 ||
+			strings.TrimSpace(pullRequest.Title) == "" ||
+			strings.TrimSpace(pullRequest.User.Login) == "" ||
+			strings.TrimSpace(pullRequest.HTMLURL) == "" ||
+			pullRequest.CreatedAt.IsZero() ||
+			strings.TrimSpace(pullRequest.Head.Ref) == "" ||
+			strings.TrimSpace(pullRequest.Base.Ref) == "" ||
+			(state != "open" && state != "closed") {
+			return nil, false, ErrInvalidResponse
+		}
+	}
+
+	return pullRequests, hasNextPage(resp.Header.Get("Link")), nil
+}
+
 // hasNextPage reports whether a GitHub Link header contains a rel="next"
 // entry, e.g. `<https://api.github.com/user/repos?page=2>; rel="next"`.
 func hasNextPage(link string) bool {

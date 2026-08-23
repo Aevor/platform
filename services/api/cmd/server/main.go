@@ -135,6 +135,12 @@ func main() {
 		repositoriesHandler.SyncIssues,
 	)
 
+	router.POST(
+		"/repositories/:id/pull-requests/sync",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.SyncPullRequests,
+	)
+
 	log.Printf("server running on :%s", cfg.Port)
 
 	err = router.Run(":" + cfg.Port)

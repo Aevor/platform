@@ -58,6 +58,38 @@ var issueUpsertAssignmentColumns = []string{
 // full page of issues can never approach PostgreSQL's parameter limits.
 const issueBatchSize = 250
 
+// pullRequestUpsertConflictColumns is the conflict target for
+// UpsertPullRequests: one PR row per (selected repository context, GitHub
+// pull request).
+var pullRequestUpsertConflictColumns = []clause.Column{
+	{Name: "selected_repository_id"},
+	{Name: "github_pull_request_id"},
+}
+
+// pullRequestUpsertAssignmentColumns lists the columns refreshed when an
+// already synced PR arrives again (title edits, state transitions, draft and
+// merge bookkeeping, branch moves, updated_at, sync bookkeeping). These
+// strings must exactly match the column names mapped by the
+// RepositoryPullRequest model (see
+// TestUpsertPullRequests_ColumnsMatchModelSchema).
+var pullRequestUpsertAssignmentColumns = []string{
+	"number",
+	"title",
+	"state",
+	"author_login",
+	"html_url",
+	"head_ref",
+	"base_ref",
+	"draft",
+	"merged",
+	"github_created_at",
+	"github_updated_at",
+	"github_closed_at",
+	"github_merged_at",
+	"synced_at",
+	"updated_at",
+}
+
 type Store interface {
 	UpsertSelected(repository *SelectedRepository) error
 	ListByUserID(userID uuid.UUID) ([]SelectedRepository, error)
@@ -71,6 +103,9 @@ type Store interface {
 	// repository in a single transaction: existing rows are refreshed with
 	// authoritative metadata, new rows are inserted — never duplicated.
 	UpsertIssues(selectedRepositoryID uuid.UUID, issues []RepositoryIssue) error
+
+	// UpsertPullRequests is the pull-request counterpart of UpsertIssues.
+	UpsertPullRequests(selectedRepositoryID uuid.UUID, pullRequests []RepositoryPullRequest) error
 }
 
 type gormStore struct {
@@ -165,6 +200,28 @@ func (s *gormStore) UpsertIssues(selectedRepositoryID uuid.UUID, issues []Reposi
 			},
 		).
 			CreateInBatches(&issues, issueBatchSize).
+			Error
+	})
+}
+
+func (s *gormStore) UpsertPullRequests(selectedRepositoryID uuid.UUID, pullRequests []RepositoryPullRequest) error {
+	if len(pullRequests) == 0 {
+		return nil
+	}
+
+	for i := range pullRequests {
+		pullRequests[i].SelectedRepositoryID = selectedRepositoryID
+		pullRequests[i].ID = uuid.Nil
+	}
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		return tx.Clauses(
+			clause.OnConflict{
+				Columns:   pullRequestUpsertConflictColumns,
+				DoUpdates: clause.AssignmentColumns(pullRequestUpsertAssignmentColumns),
+			},
+		).
+			CreateInBatches(&pullRequests, issueBatchSize).
 			Error
 	})
 }

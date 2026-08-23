@@ -94,3 +94,58 @@ func (i *RepositoryIssue) BeforeCreate(tx *gorm.DB) error {
 
 	return nil
 }
+
+// RepositoryPullRequest is the persisted Aevor metadata for one GitHub pull
+// request belonging to ONE selected-repository context. Uniqueness mirrors
+// RepositoryIssue: scoped to (selected_repository_id, github_pull_request_id)
+// so the same GitHub PR syncs independently per user context and never
+// duplicates within one. Bodies are intentionally NOT persisted yet (same
+// documented limitation as issues). GitHub timestamps keep the Github* prefix.
+type RepositoryPullRequest struct {
+	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+
+	SelectedRepositoryID uuid.UUID `gorm:"type:uuid;uniqueIndex:idx_repository_pull_requests_selected_github;not null" json:"-"`
+
+	GithubPullRequestID int64 `gorm:"uniqueIndex:idx_repository_pull_requests_selected_github;not null" json:"github_pull_request_id"`
+
+	Number int    `gorm:"not null" json:"number"`
+	Title  string `gorm:"type:text;not null" json:"title"`
+
+	State string `gorm:"size:16;not null" json:"state"`
+
+	AuthorLogin string `gorm:"size:255;not null" json:"author_login"`
+
+	HTMLURL string `gorm:"type:text" json:"html_url"`
+
+	HeadRef string `gorm:"size:255" json:"head_ref"`
+	BaseRef string `gorm:"size:255" json:"base_ref"`
+
+	Draft  bool `json:"draft"`
+	Merged bool `json:"merged"`
+
+	GithubCreatedAt time.Time  `json:"github_created_at"`
+	GithubUpdatedAt time.Time  `json:"github_updated_at"`
+	GithubClosedAt  *time.Time `json:"github_closed_at"`
+	GithubMergedAt  *time.Time `json:"github_merged_at"`
+
+	SyncedAt time.Time `json:"synced_at"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (p *RepositoryPullRequest) TableName() string {
+	return "repository_pull_requests"
+}
+
+func (p *RepositoryPullRequest) BeforeCreate(tx *gorm.DB) error {
+	if p.ID == uuid.Nil {
+		p.ID = uuid.New()
+	}
+
+	if p.SyncedAt.IsZero() {
+		p.SyncedAt = time.Now()
+	}
+
+	return nil
+}

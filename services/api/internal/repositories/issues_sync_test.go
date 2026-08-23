@@ -55,8 +55,9 @@ func newSyncFixture(t *testing.T, githubHandler http.HandlerFunc) *syncFixture {
 	client := github.NewClient(nil, github.WithBaseURL(mock.URL))
 
 	store := &fakeStore{
-		rows:   make(map[uuid.UUID]SelectedRepository),
-		issues: make(map[issueKey]RepositoryIssue),
+		rows:         make(map[uuid.UUID]SelectedRepository),
+		issues:       make(map[issueKey]RepositoryIssue),
+		pullRequests: make(map[pullRequestKey]RepositoryPullRequest),
 	}
 
 	service := NewService(userService, client, store, testEncryptionKey())
