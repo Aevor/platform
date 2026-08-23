@@ -42,6 +42,8 @@ var (
 	ErrUnavailable     = errors.New("github_unavailable")
 	ErrInvalidResponse = errors.New("github_invalid_response")
 	ErrAPIError        = errors.New("github_api_error")
+	//
+	ErrRepositoryNotFound = errors.New("github_repository_not_found")
 )
 
 const (
@@ -196,6 +198,60 @@ func (c *Client) ListUserRepositories(ctx context.Context, accessToken string, p
 	}
 
 	return repositories, hasNextPage(resp.Header.Get("Link")), nil
+}
+
+// GetRepository fetches the authoritative GitHub repository metadata by
+// numeric repository ID, using the given user's access token. A 404 means the
+// repository does not exist OR is not visible to that account — both collapse
+// to ErrRepositoryNotFound so callers can never persist a repository the
+// authenticated user cannot access.
+func (c *Client) GetRepository(ctx context.Context, accessToken string, githubRepositoryID int64) (*Repository, error) {
+	endpoint := fmt.Sprintf("%s/repositories/%d", c.baseURL, githubRepositoryID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrRepositoryNotFound
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, classifyError(resp)
+	}
+
+	var repository Repository
+
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize))
+
+	if err := decoder.Decode(&repository); err != nil {
+		return nil, ErrInvalidResponse
+	}
+
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, ErrInvalidResponse
+	}
+
+	if repository.ID <= 0 || strings.TrimSpace(repository.FullName) == "" {
+		return nil, ErrInvalidResponse
+	}
+
+	return &repository, nil
 }
 
 // hasNextPage reports whether a GitHub Link header contains a rel="next"

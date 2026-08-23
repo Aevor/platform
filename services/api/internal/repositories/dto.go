@@ -1,6 +1,10 @@
 package repositories
 
-import "github.com/Aevor/platform/services/api/internal/github"
+import (
+	"time"
+
+	"github.com/Aevor/platform/services/api/internal/github"
+)
 
 // RepositoryResponse is the Aevor-safe view of a GitHub repository. It is
 // built field-by-field from github.Repository so the raw GitHub payload (and
@@ -60,4 +64,52 @@ func ToListResponse(
 	}
 
 	return response
+}
+
+// SelectRequest carries only the GitHub repository identifier. The backend
+// resolves everything else from the authoritative GitHub API using the
+// authenticated user's own credentials.
+type SelectRequest struct {
+	GithubRepositoryID int64 `json:"github_repository_id"`
+}
+
+// SelectedRepositoryResponse is the Aevor-safe view of a persisted repository
+// context. UserID is deliberately omitted: ownership is implicit in the
+// authenticated session.
+type SelectedRepositoryResponse struct {
+	ID                 string    `json:"id"`
+	GithubRepositoryID int64     `json:"github_repository_id"`
+	Name               string    `json:"name"`
+	FullName           string    `json:"full_name"`
+	OwnerLogin         string    `json:"owner_login"`
+	Private            bool      `json:"private"`
+	DefaultBranch      string    `json:"default_branch"`
+	HTMLURL            string    `json:"html_url"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+func ToSelectedRepositoryResponse(selected SelectedRepository) SelectedRepositoryResponse {
+	return SelectedRepositoryResponse{
+		ID:                 selected.ID.String(),
+		GithubRepositoryID: selected.GithubRepositoryID,
+		Name:               selected.Name,
+		FullName:           selected.FullName,
+		OwnerLogin:         selected.OwnerLogin,
+		Private:            selected.Private,
+		DefaultBranch:      selected.DefaultBranch,
+		HTMLURL:            selected.HTMLURL,
+		CreatedAt:          selected.CreatedAt,
+		UpdatedAt:          selected.UpdatedAt,
+	}
+}
+
+func ToSelectedListResponse(selected []SelectedRepository) map[string][]SelectedRepositoryResponse {
+	response := make([]SelectedRepositoryResponse, 0, len(selected))
+
+	for _, repository := range selected {
+		response = append(response, ToSelectedRepositoryResponse(repository))
+	}
+
+	return map[string][]SelectedRepositoryResponse{"repositories": response}
 }

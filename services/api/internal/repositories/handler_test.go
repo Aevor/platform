@@ -95,13 +95,14 @@ func (f *fakeListRepository) UpsertByGitHubID(user *users.User) error {
 	return nil
 }
 
-// listFixture bundles the full real dependency chain with a fake persistence
-// layer and a mock GitHub API: fake users.Repository -> users.Service ->
+// listFixture bundles the full real dependency chain with fake persistence
+// and a mock GitHub API: fake users.Repository + fake Store -> users.Service ->
 // repositories.Service -> github.Client -> httptest server.
 type listFixture struct {
 	router     *gin.Engine
 	githubMock *httptest.Server
 	repo       *fakeListRepository
+	store      *fakeStore
 	jwtManager *auth.JWTManager
 }
 
@@ -136,7 +137,9 @@ func newListFixture(
 
 	client := github.NewClient(nil, github.WithBaseURL(githubMock.URL))
 
-	service := NewService(userService, client, testEncryptionKey())
+	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository)}
+
+	service := NewService(userService, client, store, testEncryptionKey())
 
 	jwtManager := auth.NewJWTManager([]byte(testJWTSecret))
 
@@ -148,11 +151,27 @@ func newListFixture(
 		auth.RequireAuth(jwtManager),
 		handler.List,
 	)
+	router.POST(
+		"/repositories",
+		auth.RequireAuth(jwtManager),
+		handler.Select,
+	)
+	router.GET(
+		"/repositories/selected",
+		auth.RequireAuth(jwtManager),
+		handler.ListSelected,
+	)
+	router.DELETE(
+		"/repositories/:id",
+		auth.RequireAuth(jwtManager),
+		handler.Delete,
+	)
 
 	return &listFixture{
 		router:     router,
 		githubMock: githubMock,
 		repo:       repo,
+		store:      store,
 		jwtManager: jwtManager,
 	}
 }

@@ -38,6 +38,16 @@ func main() {
 
 	log.Println("user migration completed")
 
+	log.Println("running selected-repository migrations")
+
+	err = repositories.Migrate(db)
+
+	if err != nil {
+		log.Fatal("failed to migrate selected_repositories table: ", err)
+	}
+
+	log.Println("selected-repository migration completed")
+
 	userRepository := users.NewRepository(db)
 	userService := users.NewService(userRepository)
 
@@ -57,6 +67,7 @@ func main() {
 	repositoriesService := repositories.NewService(
 		userService,
 		ghClient,
+		repositories.NewStore(db),
 		cfg.GitHubTokenEncryptionKey,
 	)
 	repositoriesHandler := repositories.NewHandler(repositoriesService)
@@ -95,6 +106,24 @@ func main() {
 		"/repositories",
 		auth.RequireAuth(jwtManager),
 		repositoriesHandler.List,
+	)
+
+	router.POST(
+		"/repositories",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Select,
+	)
+
+	router.GET(
+		"/repositories/selected",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.ListSelected,
+	)
+
+	router.DELETE(
+		"/repositories/:id",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Delete,
 	)
 
 	log.Printf("server running on :%s", cfg.Port)

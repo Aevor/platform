@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/github"
@@ -126,4 +127,137 @@ func paginationParams(
 	}
 
 	return page, perPage, nil
+}
+
+// Select handles POST /repositories. The authenticated user's own GitHub
+// token decides whether the repository may be selected; the request body only
+// names the GitHub repository ID.
+func (h *Handler) Select(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	var request SelectRequest
+
+	if err := c.ShouldBindJSON(&request); err != nil || request.GithubRepositoryID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	selected, err := h.service.SelectForUser(c.Request.Context(), userID, request.GithubRepositoryID)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, users.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found",
+			})
+		case errors.Is(err, users.ErrGitHubTokenMissing):
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "github_token_missing",
+			})
+		case errors.Is(err, github.ErrRepositoryNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, github.ErrUnauthorized):
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "github_token_invalid",
+			})
+		case errors.Is(err, github.ErrRateLimited):
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": "github_rate_limited",
+			})
+		case errors.Is(err, github.ErrUnavailable),
+			errors.Is(err, github.ErrInvalidResponse),
+			errors.Is(err, github.ErrAPIError):
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "github_unavailable",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, ToSelectedRepositoryResponse(*selected))
+}
+
+// ListSelected handles GET /repositories/selected: only the authenticated
+// user's persisted repository contexts.
+func (h *Handler) ListSelected(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	selected, err := h.service.ListSelected(userID)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, ToSelectedListResponse(selected))
+}
+
+// Delete handles DELETE /repositories/:id where :id is the Aevor record ID.
+// Unknown and foreign IDs are deliberately indistinguishable (404).
+func (h *Handler) Delete(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	err = h.service.RemoveSelected(userID, id)
+
+	if err != nil {
+		if errors.Is(err, ErrSelectedNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+			return
+		}
+
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal",
+		})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
 }
