@@ -5,7 +5,17 @@ NOTE: the canonical project docs live in the `docs` repo at `docs/development-st
 
 ## Branch / baseline
 
-- Working branch: `fix/users-upsert-token-column` (ahead of `main` @ `1040ebc` by `098dd4d` fix(users) upsert column + regression/integration tests, `a8b4479` test(auth) jwt deflake, plus docs commit). Task 1 Parts 1–10 were previously merged to `main`/`origin/main` via PRs up to #38. The `feat` branch is STALE — do not treat it as current.
+- Working branch: `feature/github-repositories` (stacked on `fix/users-upsert-token-column`, which is ahead of `main` @ `1040ebc`). Task 2a (`GET /repositories`) lives on the new branch; merge order: fix branch first, then feature. The old local+remote branches `feat` and `backup/wip-feat-668fa85` are STALE.
+
+## GitHub repository discovery (Task 2a, 2026-08-23)
+
+- NEW: authenticated `GET /repositories` — Handler (`internal/repositories/handler.go`) → Service (`service.go`) → existing `internal/github.Client.ListUserRepositories` (GET `/user/repos?sort=full_name&direction=asc&page=&per_page=`, Link-header pagination → `has_more`) → GitHub API.
+- Identity comes ONLY from `RequireAuth` JWT; token retrieval/decryption via new `users.Service.DecryptedGitHubToken` (403 `github_token_missing` when absent; decrypt failure maps to 500 `internal`); GitHub rejecting the stored token maps to 401 `github_token_invalid` (re-login remedy); rate limit surfaces as 429 `github_rate_limited`; all other GitHub failures collapse to 500 `github_unavailable`.
+- Response DTO is field-by-field mapped (id/name/full_name/description/private/default_branch/owner_login/html_url/clone_url/api_url + page/per_page/has_more); plaintext and encrypted tokens are asserted absent from success and error bodies by tests.
+- No persistence added: repositories are fetched live from GitHub per request (discovery first). Pagination params validated (400 `invalid_pagination`), per_page clamped at 100.
+- Verified: full suite green (`go build/vet/test/-race`), live server checks pass (health, unauth 401, missing-token 403, invalid-token 401 via real GitHub), fixture cleanup verified 0 rows.
+- KNOWN ISSUE (deferred, pre-existing): GORM default logger in `pkg/database/postgres.go` logs SQL errors with bound values (incl. ciphertext) to stdout — tighten in a dedicated task.
+- Deferred docs duty: add `GET /repositories` contract to canonical `docs/api-spec.md` once the `docs` repo branch situation (`feat/ai-docs`, untracked state files) is cleaned up.
 
 ## Security gate status (verified 2026-08-22)
 
