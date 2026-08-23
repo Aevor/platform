@@ -112,10 +112,22 @@ Canonical project docs live in the `docs` repo (`docs/development-state.md`); th
   - Tests: `internal/workspace/cloner_test.go` (validator matrix incl. userinfo injection, file opt-in, unreachable-URL classification); `internal/repositories/clone_test.go` (REAL go-git clone from a locally built file:// repo proving working-tree files land + `.git/config` stays token-free; idempotent second call = zero cloner invocations; corrupted-workspace repair; failure discards; auth-reject + timeout mappings incl. elapsed-time gate; policy-violation matrix with zero clones attempted; foreign ≡ unknown 404; missing token; vanished upstream repo; handler contract incl. uniform 401 + identifier-only success + opaque foreign 404). Fixtures migrated to shared `newTestService`.
   - Verified live (server :8088 + mock GitHub serving authoritative payload with file:// clone_url + real PostgreSQL): `/health` 200; unauth 401; foreign 404 `repository_not_found`; happy clone 200 ready with real workspace on disk (`README.md` + `.git`), ZERO occurrences of the plaintext token under `.git/config` or logs; second call idempotent; cleanup left 0 residual rows; temp helper removed.
 
+## Completed (2026-08-23 — Task 3b repository codebase discovery)
+
+- **Task 3b — `POST /repositories/:id/discover` (complete, verified 2026-08-23):** READ-ONLY inspection of an already-cloned Aevor workspace for one of the authenticated user's selected repositories. Metadata only — no AI, no embeddings, no vector DB, no code analysis, no source content returned.
+  - NEW package `internal/discovery` (pure Go, stateless, concurrency-safe): metadata-only walker (`filepath.WalkDir`, Lstat semantics) counting files/directories; programming-language detection by file extension ONLY (md/json/yaml/toml excluded so docs/config cannot drown out code signals); important project/configuration markers (README/LICENSE/Makefile/Dockerfile/docker-compose/package.json/go.mod/Cargo.toml/pom.xml/build.gradle/requirements.txt/pyproject.toml/setup.py/composer.json/Gemfile/tsconfig.json/`.github/workflows/*.yml|yaml`) reported as workspace-RELATIVE paths capped at 50.
+  - SECURITY by construction: nothing executed; file CONTENTS never read into memory; symlinks NEVER followed (linked files/dirs counted skipped + pruned — symlink escape can neither leak server files nor leave the workspace); only aggregates + relative paths cross the API boundary; absolute paths impossible in responses.
+  - IGNORE RULES: `.git`, `node_modules`, `vendor`, `target`, `dist`, `build`, `out`, `.next`, `coverage`, `__pycache__`, `venv/.venv`, `.gradle`, `.idea` pruned from results but NEVER deleted from disk. Configurable via `discovery.Options{MaxFiles, MaxFileSize, IgnoredDirs}` with package defaults; deliberately not env-wired yet.
+  - LIMITS: ≤20,000 files per run (beyond → `truncated:true`), files >1 MiB excluded and tallied as skipped, traversal bounded by request context.
+  - PERSISTENCE DECISION: no new table — recomputed on demand (filesystem is truth, walking is cheap); source files stay out of PostgreSQL; persisted manifest deferred until a real consumer exists.
+  - Service flow mirrors CloneRepository: ownership FIRST → readiness gate (missing/corrupted workspace → 409 `workspace_not_ready`, remedy = clone first) → walk. No GitHub contact, no token use. New errors: 409 `workspace_not_ready`, 504 `discovery_timeout`.
+  - Response: `{repository_id, files, directories, languages:{}, important_files?:[], truncated, status:"discovered"}`.
+  - Tests: `internal/discovery/discovery_test.go` (nested counts/languages/markers incl. binary exclusion; ignored dirs preserved on disk; symlink file+dir escape; large-file skip; truncation; empty workspace; missing root; cancelled context; language table); `internal/repositories/discover_test.go` (unauth 401 uniform; malformed uuid 400; foreign ≡ unknown opaque 404; missing/corrupted workspace 409; happy path vs a REAL cloned workspace with exact counts + zero leakage of tmp paths/source markers/symlinked server secrets).
+  - Verified 2026-08-23: gofmt clean; build/vet green; `go test ./... -count=1` AND `go test -race ./... -count=1` ALL green across all seven packages.
+
 ## Next
 
-- **Task 3b+ — deterministic skill/evidence extraction:** derive skill signals from synced issues, pull requests, commits, AND the cloned workspaces (file-tree/language signals). Depends on Task 3a being merged.
-- **Deferred:** tighten GORM logging in `pkg/database/postgres.go` (SQL error logs currently include bound ciphertext).
+- **Deterministic skill/evidence extraction:** derive skill signals from synced issues, pull requests, commits, AND discovered codebase structure (first consumer of Task 3b manifests). Depends on this branch being merged.
 
 ## Future
 
