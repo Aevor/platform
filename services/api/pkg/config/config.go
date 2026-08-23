@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -29,6 +30,21 @@ type AppConfig struct {
 	JWTSecret []byte
 
 	GitHubTokenEncryptionKey []byte
+
+	// WorkspaceRoot is the controlled filesystem root under which every
+	// cloned repository workspace lives (WORKSPACE_ROOT). Required and
+	// validated at startup: the API never writes workspaces to arbitrary
+	// locations.
+	WorkspaceRoot string
+
+	// CloneAllowedHosts is the https-host allowlist for Git clone targets
+	// (CLONE_ALLOWED_HOSTS, comma-separated; default "github.com").
+	CloneAllowedHosts []string
+
+	// CloneAllowFileTransport opts in to file:// clone URLs for local
+	// development and integration verification only
+	// (CLONE_ALLOW_FILE_URLS=true). Production keeps it false.
+	CloneAllowFileTransport bool
 }
 
 func Load() (*AppConfig, error) {
@@ -54,6 +70,13 @@ func Load() (*AppConfig, error) {
 		GitHubBaseURL:            os.Getenv("GITHUB_API_BASE_URL"),
 		JWTSecret:                []byte(os.Getenv("JWT_SECRET")),
 		GitHubTokenEncryptionKey: encryptionKey,
+		WorkspaceRoot:            os.Getenv("WORKSPACE_ROOT"),
+		CloneAllowedHosts:        splitCSV(os.Getenv("CLONE_ALLOWED_HOSTS")),
+		CloneAllowFileTransport:  os.Getenv("CLONE_ALLOW_FILE_URLS") == "true",
+	}
+
+	if len(cfg.CloneAllowedHosts) == 0 {
+		cfg.CloneAllowedHosts = []string{"github.com"}
 	}
 
 	if cfg.Port == "" {
@@ -88,7 +111,28 @@ func (c *AppConfig) validate() error {
 		return fmt.Errorf("GITHUB_TOKEN_ENCRYPTION_KEY must be a 32-byte hex string (64 hex characters)")
 	}
 
+	if c.WorkspaceRoot == "" {
+		return fmt.Errorf("WORKSPACE_ROOT is required (controlled directory for repository workspaces)")
+	}
+
 	return nil
+}
+
+func splitCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+
+	return result
 }
 
 func decodeHex(raw string) ([]byte, error) {
