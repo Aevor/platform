@@ -114,7 +114,9 @@ func TestUserModel_TokenColumnNeverSerialized(t *testing.T) {
 		t.Fatal("the User model does not map a git_hub_access_token column")
 	}
 
-	if _, ok := field.TagSettings["JSON"]; ok {
-		t.Errorf("token field has a JSON tag %q; it must never be serialized", field.TagSettings["JSON"])
+	// The json struct tag lives on field.Tag, not in TagSettings
+	// (TagSettings only parses the gorm tag).
+	if serialized := field.Tag.Get("json"); serialized != "-" {
+		t.Errorf("token field json tag = %q; it must be %q so it is never serialized", serialized, "-")
 	}
 }
