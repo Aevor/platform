@@ -5,7 +5,17 @@ NOTE: the canonical project docs live in the `docs` repo at `docs/development-st
 
 ## Branch / baseline
 
-- Working branch: `feature/github-repositories` (stacked on `fix/users-upsert-token-column`, which is ahead of `main` @ `1040ebc`). Task 2a (`GET /repositories`) lives on the new branch; merge order: fix branch first, then feature. The old local+remote branches `feat` and `backup/wip-feat-668fa85` are STALE.
+- Working branch: `feature/github-repositories` (stacked on `fix/users-upsert-token-column`, which is ahead of `main` @ `1040ebc`). Task 2a (`GET /repositories`) AND Task 2b (repository selection) live on the new branch; merge order: fix branch first, then feature. The old local+remote branches `feat` and `backup/wip-feat-668fa85` are STALE.
+
+## Repository selection + persisted repository context (Task 2b, 2026-08-23)
+
+- NEW endpoints (all Bearer Aevor JWT, identity solely from verified token): `POST /repositories` (`{"github_repository_id":<int>}`), `GET /repositories/selected`, `DELETE /repositories/:id` (Aevor record UUID).
+- Selection flow (service): decrypt authenticated user's stored GitHub token → `github.Client.GetRepository` GET `/repositories/{id}` → 404 maps to 404 `repository_not_found` and NOTHING is persisted; success persists AUTHORITATIVE GitHub metadata into `selected_repositories` bound to the user's Aevor UUID. Re-selection of the same repo UPDATES the existing row in place (never duplicates).
+- NEW table `selected_repositories`: uuid PK, `user_id` + `github_repository_id` with UNIQUE index `idx_selected_repositories_user_repo`, name/full_name/owner_login/private/default_branch/html_url/created_at/updated_at. NO token column — access is re-verified against GitHub at selection time; stored rows are metadata only.
+- Persistence behind a `Store` interface {UpsertSelected/ListByUserID/DeleteByUserAndID} + `gormStore` using `ON CONFLICT (user_id, github_repository_id) DO UPDATE ... RETURNING`; upsert columns pinned in package vars with a schema-consistency regression test (house convention after the Task 1 column bug). Migration = per-package AutoMigrate wired in `cmd/server/main.go`.
+- DELETE semantics: owner → 204; foreign or unknown record → uniform 404 `repository_not_found` (other users' record existence never revealed); malformed UUID → 400 `invalid_request`.
+- Tests: `internal/github/client_repository_test.go` (GetRepository shape/mapping/taxonomy/malformed rejection); `internal/repositories/selection_test.go` (upsert schema consistency + full handler matrix incl. cross-user isolation for the same github_repository_id and decrypted-token-to-GitHub assertion); `internal/repositories/repository_integration_test.go` (opt-in real-Postgres: insert→conflict-update preserves UUID while refreshing metadata; scoped delete; foreign-delete rejected).
+- Verified 2026-08-23: `gofmt -l .` clean; build/vet/test/`-race` all green; integration test PASSES against live PostgreSQL 16 (localhost:5432); live server checks pass — startup created `selected_repositories` with exact schema+index, POST unauth → 401, dummy-token fixture → real GitHub 401 `github_token_invalid` with ZERO rows persisted (access gate proven live), seeded row visible only to owner, foreign DELETE 404, owner DELETE 204, cleanup left 0 residual users/repositories rows.
 
 ## GitHub repository discovery (Task 2a, 2026-08-23)
 

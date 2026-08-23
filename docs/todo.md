@@ -47,7 +47,17 @@ Canonical project docs live in the `docs` repo (`docs/development-state.md`); th
   - Verified live (local server + real DB): `/health` 200; `/repositories` unauthenticated and garbage-bearer → uniform 401; fixture user with NULL token → 403 `github_token_missing`; fixture user with encrypted dummy token → GitHub rejects → 401 `github_token_invalid` (full chain proven: JWT → user lookup → decrypt → GitHub call → error map); fixture rows cleaned (0 residue).
   - Deferred finding (pre-existing): `pkg/database/postgres.go` uses GORM's default logger, so SQL errors log full statements including bound ciphertext — tighten logging as a separate task.
 
-## Current
+## Completed (2026-08-23 — Task 2b repository selection + persisted repository context)
+
+- **Task 2b (complete, verified 2026-08-23):** authenticated selection of a GitHub repository, verified accessible via the user's own stored encrypted token BEFORE any persistence; per-user retrieval; owner-only deselection. No cloning, no indexing, no AI.
+  - Files: NEW `internal/repositories/model.go` (`SelectedRepository`, table `selected_repositories`, unique index `idx_selected_repositories_user_repo` on `(user_id, github_repository_id)`, UUID PK via `BeforeCreate`, NO token column), `migration.go` (`AutoMigrate` wired in `main.go`), `repository.go` (`Store` interface {UpsertSelected/ListByUserID/DeleteByUserAndID} + `gormStore`; upsert = `ON CONFLICT (user_id, github_repository_id) DO UPDATE` with `RETURNING`; columns pinned in package vars), MODIFIED `internal/github/client.go` (+`GetRepository` GET `/repositories/{id}`, sentinel `ErrRepositoryNotFound` for 404), `internal/repositories/service.go` (+`store Store` dependency, `SelectForUser`, `ListSelected`, `RemoveSelected`, `ErrSelectedNotFound`), `dto.go`, `handler.go`, `cmd/server/main.go`.
+  - Contract (all behind Bearer Aevor JWT):
+    - `POST /repositories` body `{"github_repository_id":<int>}` → 200 with the persisted record `{id,github_repository_id,name,full_name,owner_login,private,default_branch,html_url,created_at,updated_at}`. Flow: decrypt user's token → GitHub GET `/repositories/{id}` → 404 → **404 `repository_not_found` and NOTHING is persisted** → success persists authoritative GitHub metadata. Re-selecting the same repo UPDATES the existing row in place (unique index), never duplicates.
+    - `GET /repositories/selected` → 200 `{"repositories":[...]}` scoped strictly to the authenticated user.
+    - `DELETE /repositories/:id` (Aevor record UUID) → 204 on the owner's own record; 404 `repository_not_found` for foreign/unknown records (existence of other users' records never revealed); 400 `invalid_request` for malformed UUIDs.
+  - Error surface unchanged from 2a plus: 404 `repository_not_found`. Identity solely from JWT; a request can only ever select/list/delete rows bound to its own verified `sub`.
+  - Tests: `client_repository_test.go` (path/bearer shape, mapping, 404→sentinel, status taxonomy incl. network failure, malformed/negative-id/blank-full-name rejection, token never in errors); `selection_test.go` (schema-consistency regression test validating every upsert conflict/assignment column against the parsed model mapping; full handler matrix: unauth 401 with zero GitHub contact, invalid-body matrix, success path asserting the authenticated user's DECRYPTED token reaches the mock GitHub and authoritative metadata is stored bound to the user's UUID, inaccessible-repo 404 with nothing persisted, GitHub failure mappings, missing-token 403, corrupt-ciphertext 500 `internal`, list isolation between two users sharing one github_repository_id, delete owned/foreign/unknown/malformed/unauth matrix, fake-store duplicate-selection refresh semantics); `repository_integration_test.go` (opt-in real-Postgres: insert→conflict-update preserves the same Aevor UUID while refreshing metadata, cross-user independence for the same repo, scoped delete, foreign-delete rejected). All suites green: build/vet/test/`-race`; integration PASSES against live PostgreSQL 16 (localhost:5432).
+  - Verified live (local server + real DB): startup migration created `selected_repositories` with the exact schema + unique index; `/health` 200; POST unauth → 401; fixture user with encrypted dummy token → real GitHub rejects → 401 `github_token_invalid` with **0 rows persisted** (access-verification gate proven live); seeded row visible ONLY to its owner; foreign DELETE → 404; owner DELETE → 204; post-delete list empty; all fixtures cleaned (0 residual users/repositories rows); temp helper removed.
 
 - **Task 1 close-out:**
   - DONE: repairs implemented, reviewed, tested, and committed on branch `fix/users-upsert-token-column` (`098dd4d` fix+regression tests, `a8b4479` jwt deflake, docs commit).
@@ -56,7 +66,8 @@ Canonical project docs live in the `docs` repo (`docs/development-state.md`); th
 
 ## Next
 
-- **Task 2 — GitHub data synchronization:** repository details, GitHub issues, commits, pull requests (uses the stored encrypted GitHub access token via a server-side retrieval + decrypt path).
+- **Task 2c (proposed) — GitHub issue ingestion for selected repositories:** fetch and persist issues for the user's selected repositories using the stored encrypted token; deterministic, no AI. Depends on Task 2b being merged.
+- **Deferred:** tighten GORM logging in `pkg/database/postgres.go` (SQL error logs currently include bound ciphertext).
 
 ## Future
 
