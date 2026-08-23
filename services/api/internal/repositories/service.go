@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -162,24 +163,24 @@ func collectBoundedPages[T any](
 	return collected, nil
 }
 
-// dedupByGitHubID removes items whose GitHub ID already appeared EARLIER in
-// the collected list, keeping the first occurrence. Bounded pagination over a
-// `sort=updated` listing is not snapshot-stable: an item updated between page
+// dedupByKey removes items whose key already appeared EARLIER in the
+// collected list, keeping the first occurrence. Bounded pagination over a
+// GitHub listing is not snapshot-stable: an item changed between page
 // fetches can shift across the window and be served on two pages. Persisting
 // such a batch as one multi-row INSERT ... ON CONFLICT would fail with
 // "cannot affect row a second time", so duplicates are collapsed up front.
-func dedupByGitHubID[T any](items []T, githubID func(T) int64) []T {
-	seen := make(map[int64]struct{}, len(items))
+func dedupByKey[T any, K comparable](items []T, key func(T) K) []T {
+	seen := make(map[K]struct{}, len(items))
 	deduped := make([]T, 0, len(items))
 
 	for _, item := range items {
-		id := githubID(item)
+		k := key(item)
 
-		if _, duplicate := seen[id]; duplicate {
+		if _, duplicate := seen[k]; duplicate {
 			continue
 		}
 
-		seen[id] = struct{}{}
+		seen[k] = struct{}{}
 		deduped = append(deduped, item)
 	}
 
@@ -231,7 +232,7 @@ func (s *Service) SyncIssues(
 
 	now := time.Now()
 
-	for _, issue := range dedupByGitHubID(collected, func(issue github.Issue) int64 {
+	for _, issue := range dedupByKey(collected, func(issue github.Issue) int64 {
 		return issue.ID
 	}) {
 		rows = append(rows, RepositoryIssue{
@@ -302,7 +303,7 @@ func (s *Service) SyncPullRequests(
 
 	now := time.Now()
 
-	for _, pullRequest := range dedupByGitHubID(collected, func(pullRequest github.PullRequest) int64 {
+	for _, pullRequest := range dedupByKey(collected, func(pullRequest github.PullRequest) int64 {
 		return pullRequest.ID
 	}) {
 		rows = append(rows, RepositoryPullRequest{
@@ -327,6 +328,84 @@ func (s *Service) SyncPullRequests(
 
 	if err := s.store.UpsertPullRequests(selected.ID, rows); err != nil {
 		log.Printf("pull request persistence failed for user %s repository %s: %v", userID, selected.ID, err)
+		return nil, err
+	}
+
+	return &SyncResult{
+		RepositoryID: selected.ID.String(),
+		Synced:       len(rows),
+	}, nil
+}
+
+// SyncCommits synchronizes Git commit metadata for ONE of the authenticated
+// user's selected repositories, with the same ownership, credential, and
+// bounded-pagination discipline as the issue and pull-request syncs. The SHA
+// is immutable, so repeated syncs never duplicate; refreshed metadata covers
+// GitHub-side changes such as a linked account appearing for an author.
+func (s *Service) SyncCommits(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) (*SyncResult, error) {
+	selected, err := s.store.FindByUserAndID(userID, selectedRepositoryID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	token, err := s.users.DecryptedGitHubToken(userID, s.encryptionKey)
+
+	if err != nil {
+		return nil, err
+	}
+
+	collected, err := collectBoundedPages(ctx,
+		func(ctx context.Context, page int) ([]github.Commit, bool, error) {
+			return s.github.ListRepositoryCommits(
+				ctx,
+				token,
+				selected.OwnerLogin,
+				selected.Name,
+				page,
+				syncPerPage,
+			)
+		})
+
+	if err != nil {
+		log.Printf("github commit list failed for user %s repository %s: %v", userID, selected.ID, err)
+		return nil, err
+	}
+
+	rows := make([]RepositoryCommit, 0, len(collected))
+
+	now := time.Now()
+
+	for _, commit := range dedupByKey(collected, func(commit github.Commit) string {
+		return commit.SHA
+	}) {
+		var authorLogin string
+
+		if commit.Author != nil {
+			authorLogin = strings.TrimSpace(commit.Author.Login)
+		}
+
+		rows = append(rows, RepositoryCommit{
+			SelectedRepositoryID: selected.ID,
+			GithubCommitSha:      commit.SHA,
+			Message:              commit.Commit.Message,
+			AuthorName:           commit.Commit.Author.Name,
+			AuthorEmail:          commit.Commit.Author.Email,
+			AuthorLogin:          authorLogin,
+			CommitterName:        commit.Commit.Committer.Name,
+			HTMLURL:              commit.HTMLURL,
+			GithubAuthoredAt:     commit.Commit.Author.Date,
+			GithubCommittedAt:    commit.Commit.Committer.Date,
+			SyncedAt:             now,
+		})
+	}
+
+	if err := s.store.UpsertCommits(selected.ID, rows); err != nil {
+		log.Printf("commit persistence failed for user %s repository %s: %v", userID, selected.ID, err)
 		return nil, err
 	}
 

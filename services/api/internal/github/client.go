@@ -479,6 +479,148 @@ func (c *Client) ListRepositoryPullRequests(
 	return pullRequests, hasNextPage(resp.Header.Get("Link")), nil
 }
 
+// CommitIdentity is the minimal view of a Git author/committer inside a
+// commit's `commit` object. Emails are stored for evidence purposes only —
+// Aevor never uses them as identity keys.
+type CommitIdentity struct {
+	Name  string    `json:"name"`
+	Email string    `json:"email"`
+	Date  time.Time `json:"date"`
+}
+
+// CommitAuthor is the optional GitHub ACCOUNT linked to a commit. It is null
+// on GitHub when the commit email matches no account, so both occurrences are
+// pointers and Login is treated as optional downstream.
+type CommitAuthor struct {
+	Login string `json:"login"`
+}
+
+// Commit is the Aevor view of one Git commit. The tree/parent/verification
+// structures are deliberately NOT decoded: V1 persists metadata only, and
+// skipping them keeps the response-size budget for actual list content. The
+// SHA is the natural unique identifier within a repository.
+type Commit struct {
+	SHA     string `json:"sha"`
+	HTMLURL string `json:"html_url"`
+
+	// The Git-level payload (message, author, committer) lives under the
+	// `commit` key in GitHub's API.
+	Commit struct {
+		Message   string         `json:"message"`
+		Author    CommitIdentity `json:"author"`
+		Committer CommitIdentity `json:"committer"`
+	} `json:"commit"`
+
+	Author    *CommitAuthor `json:"author"`
+	Committer *CommitAuthor `json:"committer"`
+}
+
+// ListRepositoryCommits returns one page of commits for the given repository,
+// via GET /repos/{owner}/{repo}/commits in GitHub's authoritative default
+// order (newest first on the default branch). page is 1-based; perPage is
+// clamped by the caller. The second return value reports whether GitHub
+// advertises a next page (Link header rel="next"). SHAs are normalized to
+// lowercase. Per-item validation rejects malformed entries wholesale
+// (ErrInvalidResponse): invalid SHAs, blank messages/URLs/author names, or
+// missing dates. A 404 means the repository does not exist, was renamed, or
+// is not visible to this account — it maps to ErrRepositoryNotFound so
+// callers can react uniformly.
+func (c *Client) ListRepositoryCommits(
+	ctx context.Context,
+	accessToken string,
+	owner string,
+	repository string,
+	page int,
+	perPage int,
+) ([]Commit, bool, error) {
+	endpoint := fmt.Sprintf(
+		"%s/repos/%s/%s/commits?page=%d&per_page=%d",
+		c.baseURL,
+		url.PathEscape(owner),
+		url.PathEscape(repository),
+		page,
+		perPage,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("User-Agent", c.userAgent)
+
+	resp, err := c.httpClient.Do(req)
+
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, ErrRepositoryNotFound
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, classifyError(resp)
+	}
+
+	var commits []Commit
+
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxResponseSize))
+
+	if err := decoder.Decode(&commits); err != nil {
+		return nil, false, ErrInvalidResponse
+	}
+
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false, ErrInvalidResponse
+	}
+
+	for _, commit := range commits {
+		if !isCommitSHAShape(commit.SHA) ||
+			strings.TrimSpace(commit.Commit.Message) == "" ||
+			strings.TrimSpace(commit.HTMLURL) == "" ||
+			strings.TrimSpace(commit.Commit.Author.Name) == "" ||
+			commit.Commit.Author.Date.IsZero() ||
+			commit.Commit.Committer.Date.IsZero() {
+			return nil, false, ErrInvalidResponse
+		}
+	}
+
+	return normalizeCommitSHAs(commits), hasNextPage(resp.Header.Get("Link")), nil
+}
+
+// isCommitSHAShape reports whether s looks like a full git SHA-1: exactly 40
+// hexadecimal characters.
+func isCommitSHAShape(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+			return false
+		}
+	}
+
+	return true
+}
+
+// normalizeCommitSHAs lowercases every SHA so persistence can rely on one
+// canonical form regardless of how GitHub formatted the response.
+func normalizeCommitSHAs(commits []Commit) []Commit {
+	for i := range commits {
+		commits[i].SHA = strings.ToLower(commits[i].SHA)
+	}
+
+	return commits
+}
+
 // hasNextPage reports whether a GitHub Link header contains a rel="next"
 // entry, e.g. `<https://api.github.com/user/repos?page=2>; rel="next"`.
 func hasNextPage(link string) bool {

@@ -149,3 +149,52 @@ func (p *RepositoryPullRequest) BeforeCreate(tx *gorm.DB) error {
 
 	return nil
 }
+
+// RepositoryCommit is the persisted Aevor metadata for one Git commit
+// belonging to ONE selected-repository context. The SHA is the natural unique
+// identifier within a repository, so uniqueness is scoped to
+// (selected_repository_id, github_commit_sha): the same commit syncs
+// independently per user context and never duplicates within one. Only the
+// commit MESSAGE is stored — never diffs or file contents. GitHub's linked
+// account (author login) is optional upstream: a commit whose author email
+// matches no GitHub account has no login, so AuthorLogin may be empty.
+type RepositoryCommit struct {
+	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+
+	SelectedRepositoryID uuid.UUID `gorm:"type:uuid;uniqueIndex:idx_repository_commits_selected_sha;not null" json:"-"`
+
+	GithubCommitSha string `gorm:"size:40;uniqueIndex:idx_repository_commits_selected_sha;not null" json:"github_commit_sha"`
+
+	Message string `gorm:"type:text;not null" json:"message"`
+
+	AuthorName    string `gorm:"size:255" json:"author_name"`
+	AuthorEmail   string `gorm:"size:255" json:"-"`
+	AuthorLogin   string `gorm:"size:255" json:"author_login"`
+	CommitterName string `gorm:"size:255" json:"committer_name"`
+
+	HTMLURL string `gorm:"type:text" json:"html_url"`
+
+	GithubAuthoredAt  time.Time `json:"github_authored_at"`
+	GithubCommittedAt time.Time `json:"github_committed_at"`
+
+	SyncedAt time.Time `json:"synced_at"`
+
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (c *RepositoryCommit) TableName() string {
+	return "repository_commits"
+}
+
+func (c *RepositoryCommit) BeforeCreate(tx *gorm.DB) error {
+	if c.ID == uuid.Nil {
+		c.ID = uuid.New()
+	}
+
+	if c.SyncedAt.IsZero() {
+		c.SyncedAt = time.Now()
+	}
+
+	return nil
+}

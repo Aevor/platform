@@ -8,5 +8,10 @@ import (
 // repository_pull_requests tables via GORM AutoMigrate — the same
 // deterministic, additive mechanism users.Migrate uses.
 func Migrate(db *gorm.DB) error {
-	return db.AutoMigrate(&SelectedRepository{}, &RepositoryIssue{}, &RepositoryPullRequest{})
+	return db.AutoMigrate(
+		&SelectedRepository{},
+		&RepositoryIssue{},
+		&RepositoryPullRequest{},
+		&RepositoryCommit{},
+	)
 }

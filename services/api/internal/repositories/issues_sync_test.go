@@ -58,6 +58,7 @@ func newSyncFixture(t *testing.T, githubHandler http.HandlerFunc) *syncFixture {
 		rows:         make(map[uuid.UUID]SelectedRepository),
 		issues:       make(map[issueKey]RepositoryIssue),
 		pullRequests: make(map[pullRequestKey]RepositoryPullRequest),
+		commits:      make(map[commitKey]RepositoryCommit),
 	}
 
 	service := NewService(userService, client, store, testEncryptionKey())

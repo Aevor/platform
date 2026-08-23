@@ -27,10 +27,13 @@ type fakeStore struct {
 	// pullRequests emulates the (selected_repository_id,
 	// github_pull_request_id) unique constraint the same way.
 	pullRequests map[pullRequestKey]RepositoryPullRequest
-	upserts      int
-	deletes      int
-	upsertErr    error
-	deleteErr    error
+	// commits emulates the (selected_repository_id, github_commit_sha)
+	// unique constraint of repository_commits.
+	commits   map[commitKey]RepositoryCommit
+	upserts   int
+	deletes   int
+	upsertErr error
+	deleteErr error
 }
 
 type issueKey struct {
@@ -41,6 +44,11 @@ type issueKey struct {
 type pullRequestKey struct {
 	selectedRepositoryID uuid.UUID
 	githubPullRequestID  int64
+}
+
+type commitKey struct {
+	selectedRepositoryID uuid.UUID
+	githubCommitSha      string
 }
 
 func (f *fakeStore) UpsertSelected(repository *SelectedRepository) error {
@@ -664,7 +672,7 @@ func TestDelete_RemovesOwnRecordOnly(t *testing.T) {
 }
 
 func TestService_UpsertRefreshesMetadataOnDuplicateSelection(t *testing.T) {
-	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository), issues: make(map[issueKey]RepositoryIssue), pullRequests: make(map[pullRequestKey]RepositoryPullRequest)}
+	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository), issues: make(map[issueKey]RepositoryIssue), pullRequests: make(map[pullRequestKey]RepositoryPullRequest), commits: make(map[commitKey]RepositoryCommit)}
 
 	first := &SelectedRepository{UserID: uuid.New(), GithubRepositoryID: 42, Name: "old-name"}
 
@@ -695,11 +703,35 @@ func TestService_UpsertRefreshesMetadataOnDuplicateSelection(t *testing.T) {
 }
 
 func TestStore_DeleteUnknownReturnsSentinel(t *testing.T) {
-	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository), issues: make(map[issueKey]RepositoryIssue), pullRequests: make(map[pullRequestKey]RepositoryPullRequest)}
+	store := &fakeStore{rows: make(map[uuid.UUID]SelectedRepository), issues: make(map[issueKey]RepositoryIssue), pullRequests: make(map[pullRequestKey]RepositoryPullRequest), commits: make(map[commitKey]RepositoryCommit)}
 
 	err := store.DeleteByUserAndID(uuid.New(), uuid.New())
 
 	if !errors.Is(err, ErrSelectedNotFound) {
 		t.Errorf("error = %v, want ErrSelectedNotFound", err)
 	}
+}
+
+func (f *fakeStore) UpsertCommits(selectedRepositoryID uuid.UUID, commits []RepositoryCommit) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for i := range commits {
+		commits[i].SelectedRepositoryID = selectedRepositoryID
+		commits[i].ID = uuid.Nil
+
+		key := commitKey{selectedRepositoryID, commits[i].GithubCommitSha}
+
+		if existing, ok := f.commits[key]; ok {
+			commits[i].ID = existing.ID
+			commits[i].CreatedAt = existing.CreatedAt
+		} else {
+			commits[i].ID = uuid.New()
+			commits[i].CreatedAt = time.Now()
+		}
+
+		f.commits[key] = commits[i]
+	}
+
+	return nil
 }

@@ -90,6 +90,33 @@ var pullRequestUpsertAssignmentColumns = []string{
 	"updated_at",
 }
 
+// commitUpsertConflictColumns is the conflict target for UpsertCommits: one
+// row per (selected repository context, git SHA).
+var commitUpsertConflictColumns = []clause.Column{
+	{Name: "selected_repository_id"},
+	{Name: "github_commit_sha"},
+}
+
+// commitUpsertAssignmentColumns lists the columns refreshed when an already
+// synced commit arrives again. A SHA's Git content is immutable, but GitHub
+// can still surface different metadata (e.g. a linked account appearing after
+// the author links their email); refreshed columns therefore include the
+// author login plus sync bookkeeping. These strings must exactly match the
+// column names mapped by the RepositoryCommit model (see
+// TestUpsertCommits_ColumnsMatchModelSchema).
+var commitUpsertAssignmentColumns = []string{
+	"message",
+	"author_name",
+	"author_email",
+	"author_login",
+	"committer_name",
+	"html_url",
+	"github_authored_at",
+	"github_committed_at",
+	"synced_at",
+	"updated_at",
+}
+
 type Store interface {
 	UpsertSelected(repository *SelectedRepository) error
 	ListByUserID(userID uuid.UUID) ([]SelectedRepository, error)
@@ -106,6 +133,11 @@ type Store interface {
 
 	// UpsertPullRequests is the pull-request counterpart of UpsertIssues.
 	UpsertPullRequests(selectedRepositoryID uuid.UUID, pullRequests []RepositoryPullRequest) error
+
+	// UpsertCommits persists one bounded batch of commits for a selected
+	// repository in a single transaction: existing SHAs are refreshed,
+	// new SHAs are inserted — never duplicated.
+	UpsertCommits(selectedRepositoryID uuid.UUID, commits []RepositoryCommit) error
 }
 
 type gormStore struct {
@@ -222,6 +254,28 @@ func (s *gormStore) UpsertPullRequests(selectedRepositoryID uuid.UUID, pullReque
 			},
 		).
 			CreateInBatches(&pullRequests, issueBatchSize).
+			Error
+	})
+}
+
+func (s *gormStore) UpsertCommits(selectedRepositoryID uuid.UUID, commits []RepositoryCommit) error {
+	if len(commits) == 0 {
+		return nil
+	}
+
+	for i := range commits {
+		commits[i].SelectedRepositoryID = selectedRepositoryID
+		commits[i].ID = uuid.Nil
+	}
+
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		return tx.Clauses(
+			clause.OnConflict{
+				Columns:   commitUpsertConflictColumns,
+				DoUpdates: clause.AssignmentColumns(commitUpsertAssignmentColumns),
+			},
+		).
+			CreateInBatches(&commits, issueBatchSize).
 			Error
 	})
 }
