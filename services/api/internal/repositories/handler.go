@@ -9,7 +9,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Aevor/platform/services/api/internal/auth"
+	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/discovery"
+	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
@@ -765,4 +767,259 @@ func (h *Handler) Filter(
 	}
 
 	c.JSON(http.StatusOK, toFilterResponse(id.String(), result))
+}
+
+// maxExtractedFilesInResponse caps how many per-file entries the extract
+// endpoint returns. The internal representation stays complete; only the
+// external list is bounded.
+const maxExtractedFilesInResponse = 1000
+
+// extractFileMeta is the SAFE external shape of one extracted file:
+// metadata and hash only — never content.
+type extractFileMeta struct {
+	Path        string `json:"path"`
+	Size        int64  `json:"size"`
+	Extension   string `json:"extension"`
+	Language    string `json:"language"`
+	ContentHash string `json:"content_hash"`
+}
+
+// extractResponse is the SAFE external shape of an extraction result.
+// There is deliberately NO content field: extracted contents are an internal
+// representation for future pipeline stages and never cross HTTP.
+type extractResponse struct {
+	RepositoryID    string            `json:"repository_id"`
+	TotalCandidates int               `json:"total_candidates"`
+	ExtractedCount  int               `json:"extracted_count"`
+	ExtractedBytes  int64             `json:"extracted_bytes"`
+	Skipped         map[string]int    `json:"skipped"`
+	SkippedCount    int               `json:"skipped_count"`
+	Complete        bool              `json:"complete"`
+	Files           []extractFileMeta `json:"files"`
+	FilesTruncated  bool              `json:"files_truncated"`
+	Status          string            `json:"status"`
+}
+
+func toExtractResponse(repositoryID string, result *extraction.Result) extractResponse {
+	if result.Skipped == nil {
+		result.Skipped = make(map[string]int)
+	}
+
+	limit := maxExtractedFilesInResponse
+
+	if len(result.Files) < limit {
+		limit = len(result.Files)
+	}
+
+	files := make([]extractFileMeta, 0, limit)
+
+	for _, file := range result.Files[:limit] {
+		files = append(files, extractFileMeta{
+			Path:        file.Path,
+			Size:        file.Size,
+			Extension:   file.Extension,
+			Language:    file.Language,
+			ContentHash: file.ContentHash,
+		})
+	}
+
+	return extractResponse{
+		RepositoryID:    repositoryID,
+		TotalCandidates: result.TotalCandidates,
+		ExtractedCount:  result.ExtractedCount,
+		ExtractedBytes:  result.ExtractedBytes,
+		Skipped:         result.Skipped,
+		SkippedCount:    result.SkippedCount,
+		Complete:        result.Complete,
+		Files:           files,
+		FilesTruncated:  len(result.Files) > maxExtractedFilesInResponse,
+		Status:          result.Status,
+	}
+}
+
+// Extract handles POST /repositories/:id/extract for the authenticated user.
+// Extraction is read-only and bounded; the response carries counts plus
+// per-file METADATA (path/size/extension/language/hash) — never source
+// contents, never absolute filesystem paths.
+func (h *Handler) Extract(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	result, err := h.service.ExtractRepositoryContent(c.Request.Context(), userID, id)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			// Unknown AND foreign records map identically: existence of
+			// another user's repository context is never revealed.
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, users.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found",
+			})
+		case errors.Is(err, ErrWorkspaceNotReady):
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "workspace_not_ready",
+			})
+		case errors.Is(err, filtering.ErrTimeout), errors.Is(err, extraction.ErrTimeout):
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"error": "extract_timeout",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, toExtractResponse(id.String(), result))
+}
+
+// maxChunkFilesInResponse caps how many per-file summaries the chunk
+// endpoint returns. The internal result stays complete; only the external
+// list is bounded.
+const maxChunkFilesInResponse = 1000
+
+// chunkFileSummary is the SAFE external shape of one chunked file: counts
+// and flags only. Chunk CONTENTS, hashes, line ranges, and symbol metadata
+// are internal to the future pipeline stages.
+type chunkFileSummary struct {
+	Path      string `json:"path"`
+	Language  string `json:"language"`
+	Chunks    int    `json:"chunks"`
+	Bytes     int64  `json:"bytes"`
+	Truncated bool   `json:"truncated"`
+}
+
+// chunkResponse is the SAFE external shape of a chunking run. There is
+// deliberately NO content field: chunks are an internal representation for
+// future pipeline stages and never cross HTTP.
+type chunkResponse struct {
+	RepositoryID   string             `json:"repository_id"`
+	TotalFiles     int                `json:"total_files"`
+	FilesChunked   int                `json:"files_chunked"`
+	EmptyFiles     int                `json:"empty_files"`
+	TotalChunks    int                `json:"total_chunks"`
+	TotalBytes     int64              `json:"total_bytes"`
+	Truncated      bool               `json:"truncated"`
+	SkippedSummary map[string]int     `json:"skipped_summary"`
+	Files          []chunkFileSummary `json:"files"`
+	FilesTruncated bool               `json:"files_truncated"`
+	Status         string             `json:"status"`
+}
+
+func toChunkResponse(repositoryID string, result *chunking.Result) chunkResponse {
+	if result.SkippedSummary == nil {
+		result.SkippedSummary = make(map[string]int)
+	}
+
+	limit := maxChunkFilesInResponse
+
+	if len(result.Files) < limit {
+		limit = len(result.Files)
+	}
+
+	files := make([]chunkFileSummary, 0, limit)
+
+	for _, summary := range result.Files[:limit] {
+		files = append(files, chunkFileSummary{
+			Path:      summary.Path,
+			Language:  summary.Language,
+			Chunks:    summary.Chunks,
+			Bytes:     summary.Bytes,
+			Truncated: summary.Truncated,
+		})
+	}
+
+	return chunkResponse{
+		RepositoryID:   repositoryID,
+		TotalFiles:     result.TotalFiles,
+		FilesChunked:   result.FilesChunked,
+		EmptyFiles:     result.EmptyFiles,
+		TotalChunks:    result.TotalChunks,
+		TotalBytes:     result.TotalBytes,
+		Truncated:      result.Truncated,
+		SkippedSummary: result.SkippedSummary,
+		Files:          files,
+		FilesTruncated: len(result.Files) > maxChunkFilesInResponse,
+		Status:         result.Status,
+	}
+}
+
+// Chunk handles POST /repositories/:id/chunk for the authenticated user. It
+// reuses the extract flow (ownership first, readiness gate, bounded reads)
+// and returns aggregate + per-file METADATA — never chunk contents, never
+// absolute filesystem paths.
+func (h *Handler) Chunk(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	result, err := h.service.ChunkRepositoryContent(c.Request.Context(), userID, id)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			// Unknown AND foreign records map identically: existence of
+			// another user's repository context is never revealed.
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, users.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found",
+			})
+		case errors.Is(err, ErrWorkspaceNotReady):
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "workspace_not_ready",
+			})
+		case errors.Is(err, filtering.ErrTimeout), errors.Is(err, extraction.ErrTimeout):
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"error": "extract_timeout",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, toChunkResponse(id.String(), result))
 }

@@ -10,7 +10,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/discovery"
+	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
@@ -46,6 +48,12 @@ type Service struct {
 
 	// Deterministic file filtering over prepared workspaces (Task 3c).
 	filterer *filtering.Service
+
+	// Bounded content extraction over filtered selections (Task 3d).
+	extractor *extraction.Service
+
+	// Deterministic chunking over extracted content (Task 3e).
+	chunker *chunking.Service
 }
 
 func NewService(
@@ -57,6 +65,8 @@ func NewService(
 	cloner workspace.Cloner,
 	discoverer *discovery.Service,
 	filterer *filtering.Service,
+	extractor *extraction.Service,
+	chunker *chunking.Service,
 ) *Service {
 	return &Service{
 		users:             userService,
@@ -69,6 +79,8 @@ func NewService(
 		cloneTimeout:      workspace.DefaultCloneTimeout,
 		discoverer:        discoverer,
 		filterer:          filterer,
+		extractor:         extractor,
+		chunker:           chunker,
 	}
 }
 
@@ -667,6 +679,98 @@ func (s *Service) FilterRepository(
 	log.Printf("filtering succeeded for user %s repository %s in %s (%d included of %d candidates)",
 		userID, selected.ID, time.Since(started).Round(time.Millisecond),
 		result.IncludedFiles, result.TotalFiles)
+
+	return result, nil
+}
+
+// ExtractRepositoryContent turns the authenticated user's filtered selection
+// into the internal content representation (Task 3d). The flow mirrors
+// FilterRepository: ownership FIRST, workspace readiness gate, then a bounded
+// read-only pass over exactly the files filtering selected. File contents are
+// returned only in-process for future pipeline stages — they are never logged
+// and never serialized through HTTP by the handler.
+func (s *Service) ExtractRepositoryContent(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) (*extraction.Result, error) {
+	if s.workspaces == nil || s.extractor == nil {
+		return nil, fmt.Errorf("workspace subsystem is not configured")
+	}
+
+	selected, err := s.store.FindByUserAndID(userID, selectedRepositoryID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	ready, err := s.workspaces.Ready(selected.ID)
+
+	if err != nil {
+		log.Printf("workspace inspection failed for repository %s: %v", selected.ID, err)
+		return nil, ErrWorkspaceNotReady
+	}
+
+	if !ready {
+		return nil, ErrWorkspaceNotReady
+	}
+
+	started := time.Now()
+
+	extractCtx, cancel := context.WithTimeout(ctx, extraction.DefaultTimeout)
+	defer cancel()
+
+	result, err := s.extractor.Extract(extractCtx, s.workspaces.Dir(selected.ID))
+
+	if err != nil {
+		log.Printf("extraction failed for user %s repository %s after %s: %v",
+			userID, selected.ID, time.Since(started).Round(time.Millisecond), err)
+		return nil, err
+	}
+
+	// Counts and bytes only — never paths and never contents.
+	log.Printf("extraction succeeded for user %s repository %s in %s (%d extracted of %d candidates, %d bytes)",
+		userID, selected.ID, time.Since(started).Round(time.Millisecond),
+		result.ExtractedCount, result.TotalCandidates, result.ExtractedBytes)
+
+	return result, nil
+}
+
+// ChunkRepositoryContent segments the authenticated user's extracted content
+// into bounded, deterministic chunks (Task 3e). It REUSES
+// ExtractRepositoryContent wholesale — ownership, workspace readiness, and
+// timeout enforcement are identical by construction. Chunking itself is a
+// pure transformation with no filesystem access; the repository identity is
+// attached here because the chunker is deliberately repository-agnostic.
+// Chunk CONTENTS stay in-process for future pipeline stages — they are never
+// logged and never serialized through HTTP.
+func (s *Service) ChunkRepositoryContent(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) (*chunking.Result, error) {
+	if s.chunker == nil {
+		return nil, fmt.Errorf("chunking subsystem is not configured")
+	}
+
+	extractionResult, err := s.ExtractRepositoryContent(ctx, userID, selectedRepositoryID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	started := time.Now()
+
+	result := s.chunker.Chunk(extractionResult)
+
+	for index := range result.Chunks {
+		result.Chunks[index].RepositoryID = selectedRepositoryID.String()
+	}
+
+	// Counts only — never paths and never contents.
+	log.Printf("chunking succeeded for user %s repository %s in %s (%d chunks, %d bytes)",
+		userID, selectedRepositoryID, time.Since(started).Round(time.Millisecond),
+		result.TotalChunks, result.TotalBytes)
 
 	return result, nil
 }

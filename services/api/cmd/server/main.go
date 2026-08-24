@@ -8,7 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Aevor/platform/services/api/internal/auth"
+	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/discovery"
+	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/repositories"
@@ -78,6 +80,14 @@ func main() {
 		log.Fatalf("workspace root configuration: %v", err)
 	}
 
+	// One shared filtering configuration feeds both the filter endpoint and
+	// content extraction, so selection budgets and read caps never diverge.
+	filteringService := filtering.NewService(filtering.Options{
+		MaxFileSize:      cfg.FilterMaxFileSize,
+		MaxTotalBytes:    cfg.FilterMaxTotalBytes,
+		MaxSelectedFiles: cfg.FilterMaxFiles,
+	})
+
 	repositoriesService := repositories.NewService(
 		userService,
 		ghClient,
@@ -86,11 +96,11 @@ func main() {
 		workspaces,
 		workspace.NewGoGitCloner().WithDepth(1),
 		discovery.NewService(discovery.Options{}),
-		filtering.NewService(filtering.Options{
-			MaxFileSize:      cfg.FilterMaxFileSize,
-			MaxTotalBytes:    cfg.FilterMaxTotalBytes,
-			MaxSelectedFiles: cfg.FilterMaxFiles,
+		filteringService,
+		extraction.NewService(filteringService, extraction.Options{
+			MaxFileSize: cfg.FilterMaxFileSize,
 		}),
+		chunking.NewService(chunking.Options{}),
 	)
 	// Clone-URL policy from configuration (production default: https to
 	// github.com only; file:// is a documented local-development opt-in).
@@ -188,6 +198,12 @@ func main() {
 		"/repositories/:id/filter",
 		auth.RequireAuth(jwtManager),
 		repositoriesHandler.Filter,
+	)
+
+	router.POST(
+		"/repositories/:id/extract",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Extract,
 	)
 
 	log.Printf("server running on :%s", cfg.Port)
