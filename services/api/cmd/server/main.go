@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Aevor/platform/services/api/internal/auth"
+	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/discovery"
 	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
@@ -99,6 +100,7 @@ func main() {
 		extraction.NewService(filteringService, extraction.Options{
 			MaxFileSize: cfg.FilterMaxFileSize,
 		}),
+		chunking.NewService(chunking.Options{}),
 	)
 	// Clone-URL policy from configuration (production default: https to
 	// github.com only; file:// is a documented local-development opt-in).
