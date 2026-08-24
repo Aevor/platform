@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/discovery"
 	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
@@ -50,6 +51,9 @@ type Service struct {
 
 	// Bounded content extraction over filtered selections (Task 3d).
 	extractor *extraction.Service
+
+	// Deterministic chunking over extracted content (Task 3e).
+	chunker *chunking.Service
 }
 
 func NewService(
@@ -62,6 +66,7 @@ func NewService(
 	discoverer *discovery.Service,
 	filterer *filtering.Service,
 	extractor *extraction.Service,
+	chunker *chunking.Service,
 ) *Service {
 	return &Service{
 		users:             userService,
@@ -75,6 +80,7 @@ func NewService(
 		discoverer:        discoverer,
 		filterer:          filterer,
 		extractor:         extractor,
+		chunker:           chunker,
 	}
 }
 
@@ -726,6 +732,45 @@ func (s *Service) ExtractRepositoryContent(
 	log.Printf("extraction succeeded for user %s repository %s in %s (%d extracted of %d candidates, %d bytes)",
 		userID, selected.ID, time.Since(started).Round(time.Millisecond),
 		result.ExtractedCount, result.TotalCandidates, result.ExtractedBytes)
+
+	return result, nil
+}
+
+// ChunkRepositoryContent segments the authenticated user's extracted content
+// into bounded, deterministic chunks (Task 3e). It REUSES
+// ExtractRepositoryContent wholesale — ownership, workspace readiness, and
+// timeout enforcement are identical by construction. Chunking itself is a
+// pure transformation with no filesystem access; the repository identity is
+// attached here because the chunker is deliberately repository-agnostic.
+// Chunk CONTENTS stay in-process for future pipeline stages — they are never
+// logged and never serialized through HTTP.
+func (s *Service) ChunkRepositoryContent(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) (*chunking.Result, error) {
+	if s.chunker == nil {
+		return nil, fmt.Errorf("chunking subsystem is not configured")
+	}
+
+	extractionResult, err := s.ExtractRepositoryContent(ctx, userID, selectedRepositoryID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	started := time.Now()
+
+	result := s.chunker.Chunk(extractionResult)
+
+	for index := range result.Chunks {
+		result.Chunks[index].RepositoryID = selectedRepositoryID.String()
+	}
+
+	// Counts only — never paths and never contents.
+	log.Printf("chunking succeeded for user %s repository %s in %s (%d chunks, %d bytes)",
+		userID, selectedRepositoryID, time.Since(started).Round(time.Millisecond),
+		result.TotalChunks, result.TotalBytes)
 
 	return result, nil
 }
