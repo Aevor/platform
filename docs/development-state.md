@@ -5,7 +5,19 @@ NOTE: the canonical project docs live in the `docs` repo at `docs/development-st
 
 ## Branch / baseline
 
-- Working branch: `feature/task3d-content-extraction` (stacked on `feature/task3c-codebase-filtering` — PR #48 OPEN; merge order: 3c first, then 3d).
+- Working branch: `feature/task3e-codebase-chunking` (stacked on `feature/task3d-content-extraction` — PR #49 OPEN, itself stacked on #48; merge order: 48 → 49 → this).
+
+## Codebase chunking + structural segmentation (Task 3e, 2026-08-24)
+
+- NEW endpoint `POST /repositories/:id/chunk` (Bearer Aevor JWT): deterministic segmentation of Task 3d extractions into bounded chunks. No AI, no embeddings, NO persistence (no new tables).
+- NEW package `internal/chunking` — PURE transformation over `extraction.Result`, ZERO filesystem access (all path/symlink/traversal/ownership security inherited from 3a–3d by construction). `ChunkRepositoryContent` reuses `ExtractRepositoryContent` wholesale and attaches repository identity afterward.
+- CHUNK MODEL: `{RepositoryID (set by service layer), FilePath, Language, ChunkIndex 0-based/file, Content = EXACT substring spanning [StartLine,EndLine] (1-based inclusive, CRLF/BOM preserved), ByteSize, ContentHash hex SHA-256 of exact bytes, SymbolName/SymbolType/ParentSymbol best-effort}`. Concatenation reproduces the file byte-for-byte; hashes change only with content.
+- STRUCTURAL RULES (column-0 heuristics, deliberately not AST): Go package/import/func(method→ParentSymbol=receiver type)/type/const/var; Python def/class/import+from; JS+TS import/export[ default] function|class/function/class; Java class|interface|enum|record granularity only. Doc comments above boundaries attach to the boundary; consecutive imports merge into one unit; blank separators stay with the preceding unit. Everything else → line-window fallback, never mid-line splits (single oversize line = documented exception chunk). NO OVERLAP — line metadata enables deterministic re-reads instead.
+- LIMITS: MaxChunkLines 200 / MaxChunkBytes 16 KiB / MaxChunksPerFile 500 / MaxChunksTotal 20000 / MaxTotalChunkBytes 32 MiB (defaults respect the 3c/3d envelope). Deterministic overflow flags: per-file → `file_chunk_limit`; global → `repository_chunk_limit`/`repository_byte_limit` + result `truncated`. Empty files → zero chunks.
+- API BOUNDARY: aggregates + per-file summaries only (`path/language/chunks/bytes/truncated`, cap 1000 + `files_truncated`); NO content field, NO per-chunk hashes/symbols crossing HTTP.
+- SECURITY: ownership FIRST (unknown ≡ foreign uniform 404) → readiness gate 409 → bounded extract → pure transform; contents never logged; error surface identical to extract (504 `extract_timeout`).
+- Tests: chunking package covers all 18 required cases incl. structural boundaries per language, doc-comment attachment, merged imports, fallback windows, byte-cap line-boundary splits, per-file vs global caps, byte budget stop, determinism (DeepEqual across runs), SHA-256 vs direct digest, unchanged/changed hash semantics, concat-exactness property, CRLF/unicode/comments verbatim; repositories handler tests add unauth/malformed/foreign≡unknown/missing+corrupted workspace contract, REAL-clone happy path (excluded files never enter, metadata-only body, no leakage, untouched ignored dirs/outside secrets, byte-identical determinism).
+- Verified 2026-08-24: gofmt clean; build/vet/test/`-race` ALL green across ten packages.
 
 ## Codebase content extraction (Task 3d, 2026-08-24)
 
