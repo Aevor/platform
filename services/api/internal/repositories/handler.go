@@ -10,6 +10,7 @@ import (
 
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/discovery"
+	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
@@ -765,4 +766,130 @@ func (h *Handler) Filter(
 	}
 
 	c.JSON(http.StatusOK, toFilterResponse(id.String(), result))
+}
+
+// maxExtractedFilesInResponse caps how many per-file entries the extract
+// endpoint returns. The internal representation stays complete; only the
+// external list is bounded.
+const maxExtractedFilesInResponse = 1000
+
+// extractFileMeta is the SAFE external shape of one extracted file:
+// metadata and hash only — never content.
+type extractFileMeta struct {
+	Path        string `json:"path"`
+	Size        int64  `json:"size"`
+	Extension   string `json:"extension"`
+	Language    string `json:"language"`
+	ContentHash string `json:"content_hash"`
+}
+
+// extractResponse is the SAFE external shape of an extraction result.
+// There is deliberately NO content field: extracted contents are an internal
+// representation for future pipeline stages and never cross HTTP.
+type extractResponse struct {
+	RepositoryID    string            `json:"repository_id"`
+	TotalCandidates int               `json:"total_candidates"`
+	ExtractedCount  int               `json:"extracted_count"`
+	ExtractedBytes  int64             `json:"extracted_bytes"`
+	Skipped         map[string]int    `json:"skipped"`
+	SkippedCount    int               `json:"skipped_count"`
+	Complete        bool              `json:"complete"`
+	Files           []extractFileMeta `json:"files"`
+	FilesTruncated  bool              `json:"files_truncated"`
+	Status          string            `json:"status"`
+}
+
+func toExtractResponse(repositoryID string, result *extraction.Result) extractResponse {
+	if result.Skipped == nil {
+		result.Skipped = make(map[string]int)
+	}
+
+	limit := maxExtractedFilesInResponse
+
+	if len(result.Files) < limit {
+		limit = len(result.Files)
+	}
+
+	files := make([]extractFileMeta, 0, limit)
+
+	for _, file := range result.Files[:limit] {
+		files = append(files, extractFileMeta{
+			Path:        file.Path,
+			Size:        file.Size,
+			Extension:   file.Extension,
+			Language:    file.Language,
+			ContentHash: file.ContentHash,
+		})
+	}
+
+	return extractResponse{
+		RepositoryID:    repositoryID,
+		TotalCandidates: result.TotalCandidates,
+		ExtractedCount:  result.ExtractedCount,
+		ExtractedBytes:  result.ExtractedBytes,
+		Skipped:         result.Skipped,
+		SkippedCount:    result.SkippedCount,
+		Complete:        result.Complete,
+		Files:           files,
+		FilesTruncated:  len(result.Files) > maxExtractedFilesInResponse,
+		Status:          result.Status,
+	}
+}
+
+// Extract handles POST /repositories/:id/extract for the authenticated user.
+// Extraction is read-only and bounded; the response carries counts plus
+// per-file METADATA (path/size/extension/language/hash) — never source
+// contents, never absolute filesystem paths.
+func (h *Handler) Extract(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	result, err := h.service.ExtractRepositoryContent(c.Request.Context(), userID, id)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			// Unknown AND foreign records map identically: existence of
+			// another user's repository context is never revealed.
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, users.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found",
+			})
+		case errors.Is(err, ErrWorkspaceNotReady):
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "workspace_not_ready",
+			})
+		case errors.Is(err, filtering.ErrTimeout), errors.Is(err, extraction.ErrTimeout):
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"error": "extract_timeout",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, toExtractResponse(id.String(), result))
 }

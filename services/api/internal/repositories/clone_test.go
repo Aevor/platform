@@ -20,6 +20,7 @@ import (
 
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/discovery"
+	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
@@ -43,7 +44,19 @@ func newTestService(
 		t.Fatalf("workspace manager: %v", err)
 	}
 
-	return NewService(userService, client, store, testEncryptionKey(), workspaces, &fakeCloner{}, discovery.NewService(discovery.Options{}), filtering.NewService(filtering.Options{}))
+	filterer := filtering.NewService(filtering.Options{})
+
+	return NewService(
+		userService,
+		client,
+		store,
+		testEncryptionKey(),
+		workspaces,
+		&fakeCloner{},
+		discovery.NewService(discovery.Options{}),
+		filterer,
+		extraction.NewService(filterer, extraction.Options{}),
+	)
 }
 
 // fakeCloner records Clone calls; fn optionally simulates outcomes.
@@ -157,7 +170,18 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 	}
 
 	cloner := &fakeCloner{}
-	service := NewService(userService, client, store, testEncryptionKey(), workspaces, cloner, discovery.NewService(discovery.Options{}), filtering.NewService(filtering.Options{}))
+	filterer := filtering.NewService(filtering.Options{})
+	service := NewService(
+		userService,
+		client,
+		store,
+		testEncryptionKey(),
+		workspaces,
+		cloner,
+		discovery.NewService(discovery.Options{}),
+		filterer,
+		extraction.NewService(filterer, extraction.Options{}),
+	)
 	service.ConfigureCloneURLPolicy(workspace.DefaultAllowedHosts, true)
 
 	jwtManager := auth.NewJWTManager([]byte(testJWTSecret))
@@ -178,6 +202,11 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 		"/repositories/:id/filter",
 		auth.RequireAuth(jwtManager),
 		handler.Filter,
+	)
+	router.POST(
+		"/repositories/:id/extract",
+		auth.RequireAuth(jwtManager),
+		handler.Extract,
 	)
 
 	fixture := &cloneFixture{
