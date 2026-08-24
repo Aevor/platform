@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Aevor/platform/services/api/internal/auth"
+	"github.com/Aevor/platform/services/api/internal/discovery"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/repositories"
 	"github.com/Aevor/platform/services/api/internal/users"
@@ -83,6 +84,7 @@ func main() {
 		cfg.GitHubTokenEncryptionKey,
 		workspaces,
 		workspace.NewGoGitCloner().WithDepth(1),
+		discovery.NewService(discovery.Options{}),
 	)
 	// Clone-URL policy from configuration (production default: https to
 	// github.com only; file:// is a documented local-development opt-in).
@@ -168,6 +170,12 @@ func main() {
 		"/repositories/:id/clone",
 		auth.RequireAuth(jwtManager),
 		repositoriesHandler.Clone,
+	)
+
+	router.POST(
+		"/repositories/:id/discover",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Discover,
 	)
 
 	log.Printf("server running on :%s", cfg.Port)
