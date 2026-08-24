@@ -3,6 +3,7 @@ package repositories
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
+	"github.com/Aevor/platform/services/api/internal/workspace"
 )
 
 // ErrSelectedNotFound is returned when a selected-repository record either
@@ -23,6 +25,14 @@ type Service struct {
 	github        *github.Client
 	store         Store
 	encryptionKey []byte
+
+	// Workspace access for repository cloning (Task 3a). workspaces is nil
+	// only in legacy constructions that predate cloning; CloneRepository
+	// fails closed in that case.
+	workspaces        *workspace.Manager
+	cloner            workspace.Cloner
+	cloneURLValidator func(string) error
+	cloneTimeout      time.Duration
 }
 
 func NewService(
@@ -30,12 +40,18 @@ func NewService(
 	githubClient *github.Client,
 	store Store,
 	encryptionKey []byte,
+	workspaces *workspace.Manager,
+	cloner workspace.Cloner,
 ) *Service {
 	return &Service{
-		users:         userService,
-		github:        githubClient,
-		store:         store,
-		encryptionKey: encryptionKey,
+		users:             userService,
+		github:            githubClient,
+		store:             store,
+		encryptionKey:     encryptionKey,
+		workspaces:        workspaces,
+		cloner:            cloner,
+		cloneURLValidator: workspace.MakeCloneURLValidator(workspace.DefaultAllowedHosts, false),
+		cloneTimeout:      workspace.DefaultCloneTimeout,
 	}
 }
 
@@ -413,4 +429,125 @@ func (s *Service) SyncCommits(
 		RepositoryID: selected.ID.String(),
 		Synced:       len(rows),
 	}, nil
+}
+
+// CloneResult reports the outcome of a workspace operation. It contains only
+// Aevor identifiers and a status word — never filesystem paths, clone URLs,
+// or token material.
+type CloneResult struct {
+	RepositoryID string `json:"repository_id"`
+	Status       string `json:"status"`
+}
+
+const (
+	cloneStatusReady = "ready"
+)
+
+// CloneRepository ensures the authenticated user's selected repository exists
+// as a private local Git workspace under the server-controlled root.
+//
+// Authorization chain: JWT-derived userID -> owned SelectedRepository ->
+// user's decrypted GitHub token -> AUTHORITATIVE GitHub repository fetch
+// (validates credentials and refreshes the clone target before any
+// filesystem work) -> validated https clone URL -> isolated shallow clone.
+//
+// Idempotency: an existing, verified workspace is left untouched and reported
+// ready; a partial or corrupted directory from an earlier failure is wiped
+// before retrying; any failure discards the partial workspace. The plaintext
+// token exists ONLY in memory for the duration of the operation — it is never
+// embedded in the stored clone URL (the clean URL is what lands in
+// .git/config), never logged, and never returned.
+func (s *Service) CloneRepository(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) (*CloneResult, error) {
+	if s.workspaces == nil || s.cloner == nil {
+		return nil, fmt.Errorf("workspace subsystem is not configured")
+	}
+
+	selected, err := s.store.FindByUserAndID(userID, selectedRepositoryID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	token, err := s.users.DecryptedGitHubToken(userID, s.encryptionKey)
+
+	if err != nil {
+		return nil, err
+	}
+
+	authoritative, err := s.github.GetRepository(ctx, token, selected.GithubRepositoryID)
+
+	if err != nil {
+		log.Printf("github repository fetch failed for user %s repository %s: %v", userID, selected.ID, err)
+		return nil, err
+	}
+
+	if err := s.cloneURLValidator(authoritative.CloneURL); err != nil {
+		log.Printf("clone url rejected for repository %s: policy violation", selected.ID)
+		return nil, workspace.ErrInvalidCloneURL
+	}
+
+	unlock := s.workspaces.LockFor(selected.ID)
+	defer unlock()
+
+	ready, err := s.workspaces.Ready(selected.ID)
+
+	if err != nil {
+		log.Printf("workspace inspection failed for repository %s: %v", selected.ID, err)
+		return nil, workspace.ErrCloneFailed
+	}
+
+	if ready {
+		// Idempotent: never destroy or blindly re-clone an existing,
+		// verified workspace.
+		return &CloneResult{RepositoryID: selected.ID.String(), Status: cloneStatusReady}, nil
+	}
+
+	dir, err := s.workspaces.Reset(selected.ID)
+
+	if err != nil {
+		log.Printf("workspace preparation failed for repository %s: %v", selected.ID, err)
+		return nil, workspace.ErrCloneFailed
+	}
+
+	started := time.Now()
+
+	cloneCtx, cancel := context.WithTimeout(ctx, s.cloneTimeout)
+	defer cancel()
+
+	err = s.cloner.Clone(cloneCtx, authoritative.CloneURL, authoritative.DefaultBranch, token, dir)
+	err = workspace.VerifyTimeout(started, s.cloneTimeout, err)
+
+	if err != nil {
+		// Never leave corrupted partial repositories behind. The underlying
+		// cause stays in the SERVER log only.
+		s.workspaces.Discard(selected.ID)
+		log.Printf("clone failed for user %s repository %s after %s: %v",
+			userID, selected.ID, time.Since(started).Round(time.Millisecond), err)
+		return nil, err
+	}
+
+	if verified, err := s.workspaces.Ready(selected.ID); !verified || err != nil {
+		s.workspaces.Discard(selected.ID)
+		log.Printf("clone verification failed for user %s repository %s", userID, selected.ID)
+		return nil, workspace.ErrCloneFailed
+	}
+
+	log.Printf("clone succeeded for user %s repository %s in %s", userID, selected.ID, time.Since(started).Round(time.Millisecond))
+
+	return &CloneResult{
+		RepositoryID: selected.ID.String(),
+		Status:       cloneStatusReady,
+	}, nil
+}
+
+// ConfigureCloneURLPolicy replaces the clone-URL validator from application
+// configuration (production default: https to github.com only; file:// is an
+// explicit local-development opt-in). It exists so cmd/server can translate
+// configuration into policy without exposing mutable internals.
+func (s *Service) ConfigureCloneURLPolicy(allowedHosts []string, allowFileTransport bool) {
+	s.cloneURLValidator = workspace.MakeCloneURLValidator(allowedHosts, allowFileTransport)
 }

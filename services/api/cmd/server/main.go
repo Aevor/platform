@@ -11,6 +11,7 @@ import (
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/repositories"
 	"github.com/Aevor/platform/services/api/internal/users"
+	"github.com/Aevor/platform/services/api/internal/workspace"
 	"github.com/Aevor/platform/services/api/pkg/config"
 	"github.com/Aevor/platform/services/api/pkg/database"
 )
@@ -67,11 +68,27 @@ func main() {
 	)
 	authHandler := auth.NewHandler(authService)
 
+	// The controlled workspace root is REQUIRED and validated at startup:
+	// repository workspaces are never written to arbitrary locations.
+	workspaces, err := workspace.NewManager(cfg.WorkspaceRoot)
+
+	if err != nil {
+		log.Fatalf("workspace root configuration: %v", err)
+	}
+
 	repositoriesService := repositories.NewService(
 		userService,
 		ghClient,
 		repositories.NewStore(db),
 		cfg.GitHubTokenEncryptionKey,
+		workspaces,
+		workspace.NewGoGitCloner().WithDepth(1),
+	)
+	// Clone-URL policy from configuration (production default: https to
+	// github.com only; file:// is a documented local-development opt-in).
+	repositoriesService.ConfigureCloneURLPolicy(
+		cfg.CloneAllowedHosts,
+		cfg.CloneAllowFileTransport,
 	)
 	repositoriesHandler := repositories.NewHandler(repositoriesService)
 
@@ -145,6 +162,12 @@ func main() {
 		"/repositories/:id/commits/sync",
 		auth.RequireAuth(jwtManager),
 		repositoriesHandler.SyncCommits,
+	)
+
+	router.POST(
+		"/repositories/:id/clone",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Clone,
 	)
 
 	log.Printf("server running on :%s", cfg.Port)
