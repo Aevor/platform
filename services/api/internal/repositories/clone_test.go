@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Aevor/platform/services/api/internal/auth"
+	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/discovery"
 	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
@@ -56,6 +57,7 @@ func newTestService(
 		discovery.NewService(discovery.Options{}),
 		filterer,
 		extraction.NewService(filterer, extraction.Options{}),
+		chunking.NewService(chunking.Options{}),
 	)
 }
 
@@ -181,6 +183,7 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 		discovery.NewService(discovery.Options{}),
 		filterer,
 		extraction.NewService(filterer, extraction.Options{}),
+		chunking.NewService(chunking.Options{}),
 	)
 	service.ConfigureCloneURLPolicy(workspace.DefaultAllowedHosts, true)
 
@@ -207,6 +210,11 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 		"/repositories/:id/extract",
 		auth.RequireAuth(jwtManager),
 		handler.Extract,
+	)
+	router.POST(
+		"/repositories/:id/chunk",
+		auth.RequireAuth(jwtManager),
+		handler.Chunk,
 	)
 
 	fixture := &cloneFixture{
