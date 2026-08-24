@@ -224,7 +224,7 @@ func (s *Service) Discover(ctx context.Context, root string) (*Summary, error) {
 
 		name := entry.Name()
 
-		if language, known := languageForExtension(filepath.Ext(name)); known {
+		if language, known := LanguageForExtension(filepath.Ext(name)); known {
 			summary.Languages[language]++
 		}
 

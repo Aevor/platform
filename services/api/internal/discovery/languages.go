@@ -2,12 +2,15 @@ package discovery
 
 import "strings"
 
-// languageForExtension maps a file extension (with dot, any case) to a
+// LanguageForExtension maps a file extension (with dot, any case) to a
 // programming-language label. Deliberately PROGRAMMING languages only:
 // markup, documentation, and configuration formats (md/json/yaml/toml/...)
 // are excluded so they cannot drown out code signals. Unknown and binary
 // extensions yield no language.
-func languageForExtension(extension string) (string, bool) {
+//
+// Exported so the Task 3c filtering layer classifies languages from the SAME
+// table instead of maintaining a divergent copy.
+func LanguageForExtension(extension string) (string, bool) {
 	if extension == "" {
 		return "", false
 	}
