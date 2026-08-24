@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Aevor/platform/services/api/internal/discovery"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/workspace"
@@ -19,6 +20,11 @@ import (
 // does not exist or does not belong to the requesting user. Callers must map
 // both cases to the same external error so ownership cannot be probed.
 var ErrSelectedNotFound = errors.New("selected repository not found")
+
+// ErrWorkspaceNotReady is returned when a selected repository has no usable
+// local workspace yet (never cloned, clone failed earlier, or corrupted).
+// The remedy for the legitimate owner is POST /repositories/:id/clone.
+var ErrWorkspaceNotReady = errors.New("workspace not ready")
 
 type Service struct {
 	users         *users.Service
@@ -33,6 +39,9 @@ type Service struct {
 	cloner            workspace.Cloner
 	cloneURLValidator func(string) error
 	cloneTimeout      time.Duration
+
+	// Read-only codebase discovery over prepared workspaces (Task 3b).
+	discoverer *discovery.Service
 }
 
 func NewService(
@@ -42,6 +51,7 @@ func NewService(
 	encryptionKey []byte,
 	workspaces *workspace.Manager,
 	cloner workspace.Cloner,
+	discoverer *discovery.Service,
 ) *Service {
 	return &Service{
 		users:             userService,
@@ -52,6 +62,7 @@ func NewService(
 		cloner:            cloner,
 		cloneURLValidator: workspace.MakeCloneURLValidator(workspace.DefaultAllowedHosts, false),
 		cloneTimeout:      workspace.DefaultCloneTimeout,
+		discoverer:        discoverer,
 	}
 }
 
@@ -550,4 +561,53 @@ func (s *Service) CloneRepository(
 // configuration into policy without exposing mutable internals.
 func (s *Service) ConfigureCloneURLPolicy(allowedHosts []string, allowFileTransport bool) {
 	s.cloneURLValidator = workspace.MakeCloneURLValidator(allowedHosts, allowFileTransport)
+}
+
+// DiscoverRepository performs READ-ONLY codebase discovery over the
+// authenticated user's prepared workspace (Task 3b).
+//
+// Authorization chain mirrors CloneRepository: JWT-derived userID ->
+// owned SelectedRepository -> workspace readiness -> metadata-only walk.
+// Nothing is executed, no file contents are read, symlinks are never
+// followed, and only aggregate metadata + RELATIVE paths are returned.
+func (s *Service) DiscoverRepository(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) (*discovery.Summary, error) {
+	if s.workspaces == nil || s.discoverer == nil {
+		return nil, fmt.Errorf("workspace subsystem is not configured")
+	}
+
+	selected, err := s.store.FindByUserAndID(userID, selectedRepositoryID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	ready, err := s.workspaces.Ready(selected.ID)
+
+	if err != nil {
+		log.Printf("workspace inspection failed for repository %s: %v", selected.ID, err)
+		return nil, ErrWorkspaceNotReady
+	}
+
+	if !ready {
+		return nil, ErrWorkspaceNotReady
+	}
+
+	started := time.Now()
+
+	summary, err := s.discoverer.Discover(ctx, s.workspaces.Dir(selected.ID))
+
+	if err != nil {
+		log.Printf("discovery failed for user %s repository %s after %s: %v",
+			userID, selected.ID, time.Since(started).Round(time.Millisecond), err)
+		return nil, err
+	}
+
+	log.Printf("discovery succeeded for user %s repository %s in %s (%d files)",
+		userID, selected.ID, time.Since(started).Round(time.Millisecond), summary.Files)
+
+	return summary, nil
 }
