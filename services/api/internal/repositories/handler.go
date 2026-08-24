@@ -9,8 +9,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Aevor/platform/services/api/internal/auth"
+	"github.com/Aevor/platform/services/api/internal/discovery"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
+	"github.com/Aevor/platform/services/api/internal/workspace"
 )
 
 const (
@@ -477,4 +479,162 @@ func (h *Handler) SyncCommits(
 	}
 
 	c.JSON(http.StatusOK, result)
+}
+
+// Clone handles POST /repositories/:id/clone for the authenticated user.
+// The response never contains filesystem paths, clone URLs, or tokens.
+func (h *Handler) Clone(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	result, err := h.service.CloneRepository(c.Request.Context(), userID, id)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			// Unknown AND foreign records map identically: existence of
+			// another user's repository context is never revealed.
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, users.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found",
+			})
+		case errors.Is(err, users.ErrGitHubTokenMissing):
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "github_token_missing",
+			})
+		case errors.Is(err, github.ErrRepositoryNotFound):
+			// Repository deleted/renamed on GitHub since selection.
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, github.ErrUnauthorized):
+		case errors.Is(err, workspace.ErrAuthRejected):
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "github_token_invalid",
+			})
+		case errors.Is(err, github.ErrRateLimited):
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": "github_rate_limited",
+			})
+		case errors.Is(err, github.ErrUnavailable),
+			errors.Is(err, github.ErrInvalidResponse),
+			errors.Is(err, github.ErrAPIError):
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "github_unavailable",
+			})
+		case errors.Is(err, workspace.ErrTimeout):
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"error": "clone_timeout",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// discoverResponse is the SAFE external shape of a discovery result:
+// aggregates and relative names only — never absolute filesystem paths,
+// never file contents.
+type discoverResponse struct {
+	RepositoryID   string         `json:"repository_id"`
+	Files          int            `json:"files"`
+	Directories    int            `json:"directories"`
+	Languages      map[string]int `json:"languages"`
+	ImportantFiles []string       `json:"important_files,omitempty"`
+	Truncated      bool           `json:"truncated"`
+	Status         string         `json:"status"`
+}
+
+// Discover handles POST /repositories/:id/discover for the authenticated
+// user. The workspace must already exist (clone first); discovery itself is
+// read-only and metadata-only.
+func (h *Handler) Discover(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	summary, err := h.service.DiscoverRepository(c.Request.Context(), userID, id)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			// Unknown AND foreign records map identically: existence of
+			// another user's repository context is never revealed.
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, users.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found",
+			})
+		case errors.Is(err, ErrWorkspaceNotReady):
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "workspace_not_ready",
+			})
+		case errors.Is(err, discovery.ErrTimeout):
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"error": "discovery_timeout",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	if summary.Languages == nil {
+		summary.Languages = make(map[string]int)
+	}
+
+	c.JSON(http.StatusOK, discoverResponse{
+		RepositoryID:   id.String(),
+		Files:          summary.Files,
+		Directories:    summary.Directories,
+		Languages:      summary.Languages,
+		ImportantFiles: summary.ImportantFiles,
+		Truncated:      summary.Truncated,
+		Status:         "discovered",
+	})
 }

@@ -61,7 +61,7 @@ func newSyncFixture(t *testing.T, githubHandler http.HandlerFunc) *syncFixture {
 		commits:      make(map[commitKey]RepositoryCommit),
 	}
 
-	service := NewService(userService, client, store, testEncryptionKey())
+	service := newTestService(t, userService, client, store)
 
 	jwtManager := auth.NewJWTManager([]byte(testJWTSecret))
 
