@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -45,12 +46,44 @@ type AppConfig struct {
 	// development and integration verification only
 	// (CLONE_ALLOW_FILE_URLS=true). Production keeps it false.
 	CloneAllowFileTransport bool
+
+	// FilterMaxFileSize is the per-file inclusion limit for codebase
+	// filtering (FILTER_MAX_FILE_SIZE, bytes). Zero means the filtering
+	// package default (1 MiB).
+	FilterMaxFileSize int64
+
+	// FilterMaxTotalBytes bounds the total size of selected content
+	// (FILTER_MAX_TOTAL_BYTES, bytes). Zero means the package default
+	// (32 MiB).
+	FilterMaxTotalBytes int64
+
+	// FilterMaxFiles bounds how many files may be included in one filtering
+	// result (FILTER_MAX_FILES). Zero means the package default (5000).
+	FilterMaxFiles int
 }
 
 func Load() (*AppConfig, error) {
 	_ = godotenv.Load()
 
 	encryptionKey, err := decodeHex(os.Getenv("GITHUB_TOKEN_ENCRYPTION_KEY"))
+
+	if err != nil {
+		return nil, err
+	}
+
+	filterMaxFileSize, err := loadPositiveInt64("FILTER_MAX_FILE_SIZE")
+
+	if err != nil {
+		return nil, err
+	}
+
+	filterMaxTotalBytes, err := loadPositiveInt64("FILTER_MAX_TOTAL_BYTES")
+
+	if err != nil {
+		return nil, err
+	}
+
+	filterMaxFiles, err := loadPositiveInt("FILTER_MAX_FILES")
 
 	if err != nil {
 		return nil, err
@@ -73,6 +106,9 @@ func Load() (*AppConfig, error) {
 		WorkspaceRoot:            os.Getenv("WORKSPACE_ROOT"),
 		CloneAllowedHosts:        splitCSV(os.Getenv("CLONE_ALLOWED_HOSTS")),
 		CloneAllowFileTransport:  os.Getenv("CLONE_ALLOW_FILE_URLS") == "true",
+		FilterMaxFileSize:        filterMaxFileSize,
+		FilterMaxTotalBytes:      filterMaxTotalBytes,
+		FilterMaxFiles:           filterMaxFiles,
 	}
 
 	if len(cfg.CloneAllowedHosts) == 0 {
@@ -116,6 +152,38 @@ func (c *AppConfig) validate() error {
 	}
 
 	return nil
+}
+
+func loadPositiveInt64(name string) (int64, error) {
+	raw := os.Getenv(name)
+
+	if raw == "" {
+		return 0, nil
+	}
+
+	value, err := strconv.ParseInt(raw, 10, 64)
+
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer when set", name)
+	}
+
+	return value, nil
+}
+
+func loadPositiveInt(name string) (int, error) {
+	raw := os.Getenv(name)
+
+	if raw == "" {
+		return 0, nil
+	}
+
+	value, err := strconv.Atoi(raw)
+
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer when set", name)
+	}
+
+	return value, nil
 }
 
 func splitCSV(raw string) []string {

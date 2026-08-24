@@ -9,6 +9,7 @@ import (
 
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/discovery"
+	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/repositories"
 	"github.com/Aevor/platform/services/api/internal/users"
@@ -85,6 +86,11 @@ func main() {
 		workspaces,
 		workspace.NewGoGitCloner().WithDepth(1),
 		discovery.NewService(discovery.Options{}),
+		filtering.NewService(filtering.Options{
+			MaxFileSize:      cfg.FilterMaxFileSize,
+			MaxTotalBytes:    cfg.FilterMaxTotalBytes,
+			MaxSelectedFiles: cfg.FilterMaxFiles,
+		}),
 	)
 	// Clone-URL policy from configuration (production default: https to
 	// github.com only; file:// is a documented local-development opt-in).
@@ -176,6 +182,12 @@ func main() {
 		"/repositories/:id/discover",
 		auth.RequireAuth(jwtManager),
 		repositoriesHandler.Discover,
+	)
+
+	router.POST(
+		"/repositories/:id/filter",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Filter,
 	)
 
 	log.Printf("server running on :%s", cfg.Port)

@@ -20,6 +20,7 @@ import (
 
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/discovery"
+	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/workspace"
@@ -42,7 +43,7 @@ func newTestService(
 		t.Fatalf("workspace manager: %v", err)
 	}
 
-	return NewService(userService, client, store, testEncryptionKey(), workspaces, &fakeCloner{}, discovery.NewService(discovery.Options{}))
+	return NewService(userService, client, store, testEncryptionKey(), workspaces, &fakeCloner{}, discovery.NewService(discovery.Options{}), filtering.NewService(filtering.Options{}))
 }
 
 // fakeCloner records Clone calls; fn optionally simulates outcomes.
@@ -156,7 +157,7 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 	}
 
 	cloner := &fakeCloner{}
-	service := NewService(userService, client, store, testEncryptionKey(), workspaces, cloner, discovery.NewService(discovery.Options{}))
+	service := NewService(userService, client, store, testEncryptionKey(), workspaces, cloner, discovery.NewService(discovery.Options{}), filtering.NewService(filtering.Options{}))
 	service.ConfigureCloneURLPolicy(workspace.DefaultAllowedHosts, true)
 
 	jwtManager := auth.NewJWTManager([]byte(testJWTSecret))
@@ -172,6 +173,11 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 		"/repositories/:id/discover",
 		auth.RequireAuth(jwtManager),
 		handler.Discover,
+	)
+	router.POST(
+		"/repositories/:id/filter",
+		auth.RequireAuth(jwtManager),
+		handler.Filter,
 	)
 
 	fixture := &cloneFixture{

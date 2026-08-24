@@ -10,6 +10,7 @@ import (
 
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/discovery"
+	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/workspace"
@@ -637,4 +638,131 @@ func (h *Handler) Discover(
 		Truncated:      summary.Truncated,
 		Status:         "discovered",
 	})
+}
+
+// filterResponse is the SAFE external shape of a filtering result: aggregate
+// counts, per-file DECISIONS (path/size/extension/language/category/included/
+// reason), and flags — never absolute filesystem paths, never file contents.
+type filterResponse struct {
+	RepositoryID       string               `json:"repository_id"`
+	TotalFiles         int                  `json:"total_files"`
+	IncludedFiles      int                  `json:"included_files"`
+	ExcludedFiles      int                  `json:"excluded_files"`
+	TotalSelectedBytes int64                `json:"total_selected_bytes"`
+	Languages          map[string]int       `json:"languages"`
+	ExclusionSummary   map[string]int       `json:"exclusion_summary"`
+	Files              []filterFileDecision `json:"files"`
+	FilesTruncated     bool                 `json:"files_truncated"`
+	IgnoredDirectories int                  `json:"ignored_directories"`
+	SymlinksSkipped    int                  `json:"symlinks_skipped"`
+	Truncated          bool                 `json:"truncated"`
+	Status             string               `json:"status"`
+}
+
+type filterFileDecision struct {
+	Path      string `json:"path"`
+	Size      int64  `json:"size"`
+	Extension string `json:"extension"`
+	Language  string `json:"language"`
+	Category  string `json:"category"`
+	Included  bool   `json:"included"`
+	Reason    string `json:"reason"`
+}
+
+func toFilterResponse(repositoryID string, result *filtering.Result) filterResponse {
+	if result.Languages == nil {
+		result.Languages = make(map[string]int)
+	}
+
+	if result.ExclusionSummary == nil {
+		result.ExclusionSummary = make(map[string]int)
+	}
+
+	files := make([]filterFileDecision, 0, len(result.Files))
+
+	for _, decision := range result.Files {
+		files = append(files, filterFileDecision{
+			Path:      decision.Path,
+			Size:      decision.Size,
+			Extension: decision.Extension,
+			Language:  decision.Language,
+			Category:  decision.Category,
+			Included:  decision.Included,
+			Reason:    decision.Reason,
+		})
+	}
+
+	return filterResponse{
+		RepositoryID:       repositoryID,
+		TotalFiles:         result.TotalFiles,
+		IncludedFiles:      result.IncludedFiles,
+		ExcludedFiles:      result.ExcludedFiles,
+		TotalSelectedBytes: result.TotalSelectedBytes,
+		Languages:          result.Languages,
+		ExclusionSummary:   result.ExclusionSummary,
+		Files:              files,
+		FilesTruncated:     result.FilesTruncated,
+		IgnoredDirectories: result.IgnoredDirectories,
+		SymlinksSkipped:    result.SymlinksSkipped,
+		Truncated:          result.Truncated,
+		Status:             result.Status,
+	}
+}
+
+// Filter handles POST /repositories/:id/filter for the authenticated user.
+// The workspace must already exist (clone first); filtering is read-only and
+// metadata-only. The response carries decisions and counts — never source
+// contents and never absolute paths.
+func (h *Handler) Filter(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	result, err := h.service.FilterRepository(c.Request.Context(), userID, id)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			// Unknown AND foreign records map identically: existence of
+			// another user's repository context is never revealed.
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, users.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found",
+			})
+		case errors.Is(err, ErrWorkspaceNotReady):
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "workspace_not_ready",
+			})
+		case errors.Is(err, filtering.ErrTimeout):
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"error": "filter_timeout",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, toFilterResponse(id.String(), result))
 }

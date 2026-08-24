@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Aevor/platform/services/api/internal/discovery"
+	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/workspace"
@@ -42,6 +43,9 @@ type Service struct {
 
 	// Read-only codebase discovery over prepared workspaces (Task 3b).
 	discoverer *discovery.Service
+
+	// Deterministic file filtering over prepared workspaces (Task 3c).
+	filterer *filtering.Service
 }
 
 func NewService(
@@ -52,6 +56,7 @@ func NewService(
 	workspaces *workspace.Manager,
 	cloner workspace.Cloner,
 	discoverer *discovery.Service,
+	filterer *filtering.Service,
 ) *Service {
 	return &Service{
 		users:             userService,
@@ -63,6 +68,7 @@ func NewService(
 		cloneURLValidator: workspace.MakeCloneURLValidator(workspace.DefaultAllowedHosts, false),
 		cloneTimeout:      workspace.DefaultCloneTimeout,
 		discoverer:        discoverer,
+		filterer:          filterer,
 	}
 }
 
@@ -610,4 +616,57 @@ func (s *Service) DiscoverRepository(
 		userID, selected.ID, time.Since(started).Round(time.Millisecond), summary.Files)
 
 	return summary, nil
+}
+
+// FilterRepository deterministically selects the files from the authenticated
+// user's prepared workspace that are suitable for future codebase analysis
+// (Task 3c). The flow mirrors DiscoverRepository: ownership FIRST, workspace
+// readiness gate, then a read-only metadata-only pass. Nothing is executed,
+// no file contents are read, symlinks are never followed, and only aggregate
+// counts plus RELATIVE-path decisions are returned. A bounded default timeout
+// keeps the synchronous endpoint from hanging on adversarial trees.
+func (s *Service) FilterRepository(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) (*filtering.Result, error) {
+	if s.workspaces == nil || s.filterer == nil {
+		return nil, fmt.Errorf("workspace subsystem is not configured")
+	}
+
+	selected, err := s.store.FindByUserAndID(userID, selectedRepositoryID)
+
+	if err != nil {
+		return nil, err
+	}
+
+	ready, err := s.workspaces.Ready(selected.ID)
+
+	if err != nil {
+		log.Printf("workspace inspection failed for repository %s: %v", selected.ID, err)
+		return nil, ErrWorkspaceNotReady
+	}
+
+	if !ready {
+		return nil, ErrWorkspaceNotReady
+	}
+
+	started := time.Now()
+
+	filterCtx, cancel := context.WithTimeout(ctx, filtering.DefaultTimeout)
+	defer cancel()
+
+	result, err := s.filterer.Filter(filterCtx, s.workspaces.Dir(selected.ID))
+
+	if err != nil {
+		log.Printf("filtering failed for user %s repository %s after %s: %v",
+			userID, selected.ID, time.Since(started).Round(time.Millisecond), err)
+		return nil, err
+	}
+
+	log.Printf("filtering succeeded for user %s repository %s in %s (%d included of %d candidates)",
+		userID, selected.ID, time.Since(started).Round(time.Millisecond),
+		result.IncludedFiles, result.TotalFiles)
+
+	return result, nil
 }

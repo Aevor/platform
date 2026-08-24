@@ -21,6 +21,9 @@ func setValidEnv(t *testing.T) {
 	t.Setenv("WORKSPACE_ROOT", t.TempDir())
 	t.Setenv("CLONE_ALLOWED_HOSTS", "")
 	t.Setenv("CLONE_ALLOW_FILE_URLS", "")
+	t.Setenv("FILTER_MAX_FILE_SIZE", "")
+	t.Setenv("FILTER_MAX_TOTAL_BYTES", "")
+	t.Setenv("FILTER_MAX_FILES", "")
 }
 
 func TestLoad_ValidConfiguration(t *testing.T) {
@@ -79,6 +82,64 @@ func TestLoad_CloneHostsAndFileTransportFromEnv(t *testing.T) {
 
 	if !cfg.CloneAllowFileTransport {
 		t.Errorf("CloneAllowFileTransport = false, want true from CLONE_ALLOW_FILE_URLS=true")
+	}
+}
+
+func TestLoad_FilterLimitsFromEnv(t *testing.T) {
+	setValidEnv(t)
+
+	cfg, err := Load()
+
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.FilterMaxFileSize != 0 || cfg.FilterMaxTotalBytes != 0 || cfg.FilterMaxFiles != 0 {
+		t.Errorf("unset filter knobs must be zero (package defaults), got %+v", cfg)
+	}
+
+	t.Setenv("FILTER_MAX_FILE_SIZE", "262144")
+	t.Setenv("FILTER_MAX_TOTAL_BYTES", "1048576")
+	t.Setenv("FILTER_MAX_FILES", "100")
+
+	cfg, err = Load()
+
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if cfg.FilterMaxFileSize != 262144 || cfg.FilterMaxTotalBytes != 1048576 || cfg.FilterMaxFiles != 100 {
+		t.Errorf("filter knobs = %+v, want parsed values", cfg)
+	}
+}
+
+func TestLoad_InvalidFilterLimitsFailSafely(t *testing.T) {
+	cases := map[string]map[string]string{
+		"negative file size": {"FILTER_MAX_FILE_SIZE": "-1"},
+		"zero total bytes":   {"FILTER_MAX_TOTAL_BYTES": "0"},
+		"non-numeric files":  {"FILTER_MAX_FILES": "many"},
+	}
+
+	for name, env := range cases {
+		t.Run(name, func(t *testing.T) {
+			setValidEnv(t)
+
+			for key, value := range env {
+				t.Setenv(key, value)
+			}
+
+			_, err := Load()
+
+			if err == nil {
+				t.Fatalf("Load() succeeded with invalid %v", env)
+			}
+
+			for key := range env {
+				if !strings.Contains(err.Error(), key) {
+					t.Errorf("error = %q, want it to name %s", err, key)
+				}
+			}
+		})
 	}
 }
 

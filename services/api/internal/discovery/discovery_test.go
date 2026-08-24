@@ -283,7 +283,7 @@ func TestLanguageForExtension(t *testing.T) {
 	}
 
 	for extension, want := range cases {
-		got, _ := languageForExtension(extension)
+		got, _ := LanguageForExtension(extension)
 
 		if got != want {
 			t.Errorf("languageForExtension(%q) = %q, want %q", extension, got, want)
