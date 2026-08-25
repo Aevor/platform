@@ -62,6 +62,7 @@ func newTestService(
 		chunking.NewService(chunking.Options{}),
 		representation.NewService(),
 		indexing.New(indexing.Options{}),
+		nil,
 	)
 }
 
@@ -190,6 +191,7 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 		chunking.NewService(chunking.Options{}),
 		representation.NewService(),
 		indexing.New(indexing.Options{}),
+		nil,
 	)
 	service.ConfigureCloneURLPolicy(workspace.DefaultAllowedHosts, true)
 

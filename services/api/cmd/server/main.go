@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Aevor/platform/services/api/internal/ai"
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/discovery"
@@ -84,6 +85,14 @@ func main() {
 		MaxSelectedFiles: cfg.FilterMaxFiles,
 	})
 
+	// The AI analysis service client communicates with the separate AI
+	// repository over HTTP. nil apiKey means no Authorization header is sent.
+	aiClient := ai.NewClient(
+		&http.Client{Timeout: 30 * time.Second},
+		ai.WithBaseURL(cfg.AIServiceURL),
+		ai.WithAPIKey(cfg.AIServiceAPIKey),
+	)
+
 	repositoriesService := repositories.NewService(
 		userService,
 		ghClient,
@@ -99,6 +108,7 @@ func main() {
 		chunking.NewService(chunking.Options{}),
 		representation.NewService(),
 		indexing.New(indexing.Options{}),
+		aiClient,
 	)
 	// Clone-URL policy from configuration (production default: https to
 	// github.com only; file:// is a documented local-development opt-in).
