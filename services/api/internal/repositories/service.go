@@ -10,11 +10,14 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Aevor/platform/services/api/internal/ai"
 	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/discovery"
 	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
+	"github.com/Aevor/platform/services/api/internal/indexing"
+	"github.com/Aevor/platform/services/api/internal/representation"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/workspace"
 )
@@ -54,6 +57,16 @@ type Service struct {
 
 	// Deterministic chunking over extracted content (Task 3e).
 	chunker *chunking.Service
+
+	// Traceable code representation over chunked content (Task 3f).
+	representer *representation.Service
+
+	// Bounded, metadata-only lookup over represented chunks (Task 3g).
+	index *indexing.Index
+
+	// External AI analysis service client (Task 3h). nil when AI analysis
+	// is not configured; AnalyzeRepositoryContent fails closed in that case.
+	aiClient *ai.Client
 }
 
 func NewService(
@@ -67,6 +80,9 @@ func NewService(
 	filterer *filtering.Service,
 	extractor *extraction.Service,
 	chunker *chunking.Service,
+	representer *representation.Service,
+	index *indexing.Index,
+	aiClient *ai.Client,
 ) *Service {
 	return &Service{
 		users:             userService,
@@ -81,6 +97,9 @@ func NewService(
 		filterer:          filterer,
 		extractor:         extractor,
 		chunker:           chunker,
+		representer:       representer,
+		index:             index,
+		aiClient:          aiClient,
 	}
 }
 
@@ -749,11 +768,24 @@ func (s *Service) ChunkRepositoryContent(
 	userID uuid.UUID,
 	selectedRepositoryID uuid.UUID,
 ) (*chunking.Result, error) {
-	if s.chunker == nil {
-		return nil, fmt.Errorf("chunking subsystem is not configured")
+	_, chunkResult, err := s.extractAndChunk(ctx, userID, selectedRepositoryID)
+
+	return chunkResult, err
+}
+
+// RepresentRepositoryContent produces the Task 3f representation for the
+// authenticated user's selected repository: extraction → chunking →
+// representation, reusing every bounded, ownership-checked stage.
+func (s *Service) RepresentRepositoryContent(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) (*representation.Result, error) {
+	if s.representer == nil {
+		return nil, fmt.Errorf("representation subsystem is not configured")
 	}
 
-	extractionResult, err := s.ExtractRepositoryContent(ctx, userID, selectedRepositoryID)
+	extractionResult, chunkResult, err := s.extractAndChunk(ctx, userID, selectedRepositoryID)
 
 	if err != nil {
 		return nil, err
@@ -761,16 +793,136 @@ func (s *Service) ChunkRepositoryContent(
 
 	started := time.Now()
 
-	result := s.chunker.Chunk(extractionResult)
+	result := s.representer.Represent(chunkResult, extractionResult)
 
-	for index := range result.Chunks {
-		result.Chunks[index].RepositoryID = selectedRepositoryID.String()
+	// Counts only — never paths and never contents.
+	log.Printf("representation succeeded for user %s repository %s in %s (%d chunks, %d bytes)",
+		userID, selectedRepositoryID, time.Since(started).Round(time.Millisecond),
+		result.TotalChunks, result.TotalBytes)
+
+	return result, nil
+}
+
+// IndexResult summarizes an authorized metadata-index replacement. It never
+// contains source content; callers needing individual metadata records must
+// use LookupIndexedContent after ownership has been verified again.
+type IndexResult struct {
+	RepositoryID string
+	Files        int
+	Chunks       int
+}
+
+// IndexRepositoryContent rebuilds the metadata-only index for one owned
+// selected repository. The existing Task 3f representation flow is reused
+// wholesale, so workspace readiness, ownership, extraction limits, chunking,
+// and traceability all remain unchanged. Replace atomically handles unchanged,
+// changed, deleted, and new files within the next repository snapshot.
+func (s *Service) IndexRepositoryContent(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) (*IndexResult, error) {
+	if s.index == nil {
+		return nil, fmt.Errorf("indexing subsystem is not configured")
+	}
+
+	// Resolve ownership before the representation flow and use only OUR stored
+	// selected-repository ID as the index identity. The client cannot choose a
+	// repository ID for a different user's data.
+	selected, err := s.store.FindByUserAndID(userID, selectedRepositoryID)
+	if err != nil {
+		return nil, err
+	}
+
+	represented, err := s.RepresentRepositoryContent(ctx, userID, selected.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.index.Replace(selected.ID.String(), represented.Chunks); err != nil {
+		return nil, err
+	}
+
+	return &IndexResult{
+		RepositoryID: selected.ID.String(),
+		Files:        represented.TotalFiles,
+		Chunks:       represented.TotalChunks,
+	}, nil
+}
+
+// IndexedFiles returns repository-relative indexed file paths only after the
+// caller's ownership of the selected repository has been established. Missing
+// indexes are represented as an empty result; no repository existence outside
+// the authenticated user's scope is observable.
+func (s *Service) IndexedFiles(
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) ([]string, error) {
+	if s.index == nil {
+		return nil, fmt.Errorf("indexing subsystem is not configured")
+	}
+
+	selected, err := s.store.FindByUserAndID(userID, selectedRepositoryID)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.index.Files(selected.ID.String()), nil
+}
+
+// LookupIndexedContent returns metadata-only records for one owned selected
+// repository. query.RepositoryID is deliberately overwritten from the
+// ownership-checked record: client or future internal callers cannot use this
+// method to select another repository's index.
+func (s *Service) LookupIndexedContent(
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+	query indexing.Query,
+) ([]indexing.Record, error) {
+	if s.index == nil {
+		return nil, fmt.Errorf("indexing subsystem is not configured")
+	}
+
+	selected, err := s.store.FindByUserAndID(userID, selectedRepositoryID)
+	if err != nil {
+		return nil, err
+	}
+
+	query.RepositoryID = selected.ID.String()
+
+	return s.index.Lookup(query), nil
+}
+
+// extractAndChunk runs the shared bounded pipeline stages (Task 3d + 3e),
+// attaching repository identity to chunks. All security properties are those
+// of the upstream stages; this helper adds none and removes none.
+func (s *Service) extractAndChunk(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+) (*extraction.Result, *chunking.Result, error) {
+	if s.chunker == nil {
+		return nil, nil, fmt.Errorf("chunking subsystem is not configured")
+	}
+
+	extractionResult, err := s.ExtractRepositoryContent(ctx, userID, selectedRepositoryID)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	started := time.Now()
+
+	chunkResult := s.chunker.Chunk(extractionResult)
+
+	for index := range chunkResult.Chunks {
+		chunkResult.Chunks[index].RepositoryID = selectedRepositoryID.String()
 	}
 
 	// Counts only — never paths and never contents.
 	log.Printf("chunking succeeded for user %s repository %s in %s (%d chunks, %d bytes)",
 		userID, selectedRepositoryID, time.Since(started).Round(time.Millisecond),
-		result.TotalChunks, result.TotalBytes)
+		chunkResult.TotalChunks, chunkResult.TotalBytes)
 
-	return result, nil
+	return extractionResult, chunkResult, nil
 }

@@ -60,6 +60,14 @@ type AppConfig struct {
 	// FilterMaxFiles bounds how many files may be included in one filtering
 	// result (FILTER_MAX_FILES). Zero means the package default (5000).
 	FilterMaxFiles int
+
+	// AIServiceURL is the base URL of the external AI analysis service
+	// (AI_SERVICE_URL). Defaults to http://localhost:11434 when empty.
+	AIServiceURL string
+
+	// AIServiceAPIKey is the server-side API key sent to the AI service
+	// (AI_SERVICE_API_KEY). Empty means no Authorization header is sent.
+	AIServiceAPIKey string
 }
 
 func Load() (*AppConfig, error) {
@@ -109,6 +117,8 @@ func Load() (*AppConfig, error) {
 		FilterMaxFileSize:        filterMaxFileSize,
 		FilterMaxTotalBytes:      filterMaxTotalBytes,
 		FilterMaxFiles:           filterMaxFiles,
+		AIServiceURL:             os.Getenv("AI_SERVICE_URL"),
+		AIServiceAPIKey:          os.Getenv("AI_SERVICE_API_KEY"),
 	}
 
 	if len(cfg.CloneAllowedHosts) == 0 {
@@ -121,6 +131,10 @@ func Load() (*AppConfig, error) {
 
 	if cfg.DBSSLMode == "" {
 		cfg.DBSSLMode = "disable"
+	}
+
+	if cfg.AIServiceURL == "" {
+		cfg.AIServiceURL = "http://localhost:11434"
 	}
 
 	if err := cfg.validate(); err != nil {

@@ -24,6 +24,8 @@ import (
 	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
+	"github.com/Aevor/platform/services/api/internal/indexing"
+	"github.com/Aevor/platform/services/api/internal/representation"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/workspace"
 )
@@ -58,6 +60,9 @@ func newTestService(
 		filterer,
 		extraction.NewService(filterer, extraction.Options{}),
 		chunking.NewService(chunking.Options{}),
+		representation.NewService(),
+		indexing.New(indexing.Options{}),
+		nil,
 	)
 }
 
@@ -184,6 +189,9 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 		filterer,
 		extraction.NewService(filterer, extraction.Options{}),
 		chunking.NewService(chunking.Options{}),
+		representation.NewService(),
+		indexing.New(indexing.Options{}),
+		nil,
 	)
 	service.ConfigureCloneURLPolicy(workspace.DefaultAllowedHosts, true)
 
@@ -215,6 +223,11 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 		"/repositories/:id/chunk",
 		auth.RequireAuth(jwtManager),
 		handler.Chunk,
+	)
+	router.POST(
+		"/repositories/:id/represent",
+		auth.RequireAuth(jwtManager),
+		handler.Represent,
 	)
 
 	fixture := &cloneFixture{

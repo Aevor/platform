@@ -7,13 +7,16 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Aevor/platform/services/api/internal/ai"
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/discovery"
 	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
+	"github.com/Aevor/platform/services/api/internal/indexing"
 	"github.com/Aevor/platform/services/api/internal/repositories"
+	"github.com/Aevor/platform/services/api/internal/representation"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/workspace"
 	"github.com/Aevor/platform/services/api/pkg/config"
@@ -34,19 +37,13 @@ func main() {
 	}
 
 	log.Println("running user migrations")
-
 	err = users.Migrate(db)
-
 	if err != nil {
 		log.Fatal("failed to migrate users table: ", err)
 	}
-
 	log.Println("user migration completed")
-
 	log.Println("running selected-repository migrations")
-
 	err = repositories.Migrate(db)
-
 	if err != nil {
 		log.Fatal("failed to migrate selected_repositories table: ", err)
 	}
@@ -88,6 +85,14 @@ func main() {
 		MaxSelectedFiles: cfg.FilterMaxFiles,
 	})
 
+	// The AI analysis service client communicates with the separate AI
+	// repository over HTTP. nil apiKey means no Authorization header is sent.
+	aiClient := ai.NewClient(
+		&http.Client{Timeout: 30 * time.Second},
+		ai.WithBaseURL(cfg.AIServiceURL),
+		ai.WithAPIKey(cfg.AIServiceAPIKey),
+	)
+
 	repositoriesService := repositories.NewService(
 		userService,
 		ghClient,
@@ -101,6 +106,9 @@ func main() {
 			MaxFileSize: cfg.FilterMaxFileSize,
 		}),
 		chunking.NewService(chunking.Options{}),
+		representation.NewService(),
+		indexing.New(indexing.Options{}),
+		aiClient,
 	)
 	// Clone-URL policy from configuration (production default: https to
 	// github.com only; file:// is a documented local-development opt-in).
@@ -204,6 +212,41 @@ func main() {
 		"/repositories/:id/extract",
 		auth.RequireAuth(jwtManager),
 		repositoriesHandler.Extract,
+	)
+
+	// Task 3e gap fix: the chunk route was never registered when chunking
+	// was wired; it existed only in tests. Registered here alongside the
+	// Task 3f representation route.
+	router.POST(
+		"/repositories/:id/chunk",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Chunk,
+	)
+
+	router.POST(
+		"/repositories/:id/represent",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Represent,
+	)
+
+	// Task 3g: metadata-only index over represented chunks. Three
+	// endpoints: rebuild, list files, and query.
+	router.POST(
+		"/repositories/:id/index",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Index,
+	)
+
+	router.GET(
+		"/repositories/:id/index/files",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.IndexedFiles,
+	)
+
+	router.POST(
+		"/repositories/:id/index/lookup",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.LookupIndexed,
 	)
 
 	log.Printf("server running on :%s", cfg.Port)
