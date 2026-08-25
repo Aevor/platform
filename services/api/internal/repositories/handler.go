@@ -4,10 +4,12 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/Aevor/platform/services/api/internal/ai"
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/discovery"
@@ -1473,5 +1475,136 @@ func (h *Handler) LookupIndexed(
 		RecordsTruncated: len(records) > maxIndexedRecordsInResponse,
 		Count:            len(records),
 		Status:           "ok",
+	})
+}
+
+// analyzeRequest is the required body for AI analysis. The query field is the
+// user's natural-language question about the codebase; repository context is
+// assembled server-side from the authenticated user's indexed metadata.
+type analyzeRequest struct {
+	Query string `json:"query"`
+}
+
+// analyzeInsight is the SAFE external shape of one AI-generated insight. File
+// locations reference repository-relative paths; raw AI output is never
+// exposed.
+type analyzeInsight struct {
+	Type       string  `json:"type"`
+	FilePath   string  `json:"file_path"`
+	StartLine  int     `json:"start_line"`
+	EndLine    int     `json:"end_line"`
+	Message    string  `json:"message"`
+	Confidence float64 `json:"confidence"`
+}
+
+// analyzeResponse is the SAFE external shape of an AI analysis result.
+type analyzeResponse struct {
+	RepositoryID string           `json:"repository_id"`
+	Summary      string           `json:"summary"`
+	Insights     []analyzeInsight `json:"insights"`
+	Status       string           `json:"status"`
+}
+
+// Analyze handles POST /repositories/:id/analyze for the authenticated user.
+// The request body carries a natural-language query; repository context is
+// assembled server-side from indexed metadata. The response is the structured
+// result from the external AI service — never raw AI output, never source
+// code, never secrets.
+func (h *Handler) Analyze(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	var request analyzeRequest
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	if strings.TrimSpace(request.Query) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "query_required",
+		})
+		return
+	}
+
+	if len(request.Query) > 4096 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "query_too_long",
+		})
+		return
+	}
+
+	result, err := h.service.AnalyzeRepositoryContent(
+		c.Request.Context(), userID, id, request.Query)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, ai.ErrUnavailable),
+			errors.Is(err, ai.ErrTimeout):
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "ai_service_unavailable",
+			})
+		case errors.Is(err, ai.ErrRateLimited):
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": "ai_rate_limited",
+			})
+		case errors.Is(err, ai.ErrUnauthorized):
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "ai_unauthorized",
+			})
+		case errors.Is(err, ai.ErrRejected):
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "ai_request_rejected",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	insights := make([]analyzeInsight, 0, len(result.Response.Insights))
+
+	for _, insight := range result.Response.Insights {
+		insights = append(insights, analyzeInsight{
+			Type:       insight.Type,
+			FilePath:   insight.FilePath,
+			StartLine:  insight.StartLine,
+			EndLine:    insight.EndLine,
+			Message:    insight.Message,
+			Confidence: insight.Confidence,
+		})
+	}
+
+	c.JSON(http.StatusOK, analyzeResponse{
+		RepositoryID: id.String(),
+		Summary:      result.Response.Summary,
+		Insights:     insights,
+		Status:       result.Response.Status,
 	})
 }
