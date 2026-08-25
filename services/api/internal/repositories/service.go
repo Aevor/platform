@@ -893,6 +893,91 @@ func (s *Service) LookupIndexedContent(
 	return s.index.Lookup(query), nil
 }
 
+// AnalyzeResult wraps the structured response from the external AI analysis
+// service. It never contains raw AI output; the response is parsed and
+// validated by the ai.Client before reaching business logic.
+type AnalyzeResult struct {
+	Response *ai.AnalyzeResponse
+}
+
+// AnalyzeRepositoryContent sends bounded repository context to the external
+// AI analysis service and returns structured insights. The flow:
+//
+//  1. Verify ownership via JWT-derived userID (same as every other method)
+//  2. Fail closed if aiClient is nil (AI not configured)
+//  3. Look up indexed metadata via index.Lookup (no filesystem access)
+//  4. Assemble bounded ContextChunks from index records (metadata only)
+//  5. Build AnalyzeRequest with repository identity + query + chunks
+//  6. Call aiClient.Analyze (HTTP to separate AI service)
+//  7. Return wrapped response
+//
+// Security: the request carries ONLY repository identity and bounded metadata
+// chunks. NEVER GitHub tokens, JWT secrets, encryption keys, credentials,
+// or environment variables. Raw source code is NOT included — only indexed
+// metadata (file paths, languages, symbols, line ranges).
+func (s *Service) AnalyzeRepositoryContent(
+	ctx context.Context,
+	userID uuid.UUID,
+	selectedRepositoryID uuid.UUID,
+	query string,
+) (*AnalyzeResult, error) {
+	if s.aiClient == nil {
+		return nil, fmt.Errorf("ai analysis subsystem is not configured")
+	}
+
+	selected, err := s.store.FindByUserAndID(userID, selectedRepositoryID)
+	if err != nil {
+		return nil, err
+	}
+
+	records := s.index.Lookup(indexing.Query{
+		RepositoryID: selected.ID.String(),
+	})
+
+	chunks := make([]ai.ContextChunk, 0, len(records))
+
+	for i := range records {
+		record := &records[i]
+
+		chunk := ai.ContextChunk{
+			ID:         record.ID,
+			FilePath:   record.FilePath,
+			Language:   record.Language,
+			FileRole:   record.FileRole,
+			ChunkIndex: record.ChunkIndex,
+			StartLine:  record.StartLine,
+			EndLine:    record.EndLine,
+			SymbolType: record.SymbolType,
+		}
+
+		if record.SymbolName != nil {
+			chunk.SymbolName = record.SymbolName
+		}
+
+		if record.ParentSymbol != nil {
+			chunk.ParentSymbol = record.ParentSymbol
+		}
+
+		chunks = append(chunks, chunk)
+	}
+
+	request := &ai.AnalyzeRequest{
+		RepositoryID:   selected.ID.String(),
+		RepositoryName: selected.Name,
+		Query:          query,
+		ContextChunks:  chunks,
+	}
+
+	response, err := s.aiClient.Analyze(ctx, request)
+	if err != nil {
+		log.Printf("ai analysis failed for user %s repository %s: %v",
+			userID, selected.ID, err)
+		return nil, err
+	}
+
+	return &AnalyzeResult{Response: response}, nil
+}
+
 // extractAndChunk runs the shared bounded pipeline stages (Task 3d + 3e),
 // attaching repository identity to chunks. All security properties are those
 // of the upstream stages; this helper adds none and removes none.
