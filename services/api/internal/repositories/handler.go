@@ -14,6 +14,8 @@ import (
 	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
+	"github.com/Aevor/platform/services/api/internal/indexing"
+	"github.com/Aevor/platform/services/api/internal/representation"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/workspace"
 )
@@ -1022,4 +1024,454 @@ func (h *Handler) Chunk(
 	}
 
 	c.JSON(http.StatusOK, toChunkResponse(id.String(), result))
+}
+
+// maxRepresentationsInResponse caps how many per-chunk entries the
+// representation endpoint returns; aggregates always cover the full run.
+const maxRepresentationsInResponse = 1000
+
+// representationEntry is the SAFE external shape of one represented chunk.
+// There is deliberately NO content field and NO absolute filesystem path:
+// contents stay internal for future pipeline stages.
+type representationEntry struct {
+	ID              string  `json:"id"`
+	FilePath        string  `json:"file_path"`
+	Directory       string  `json:"directory"`
+	Extension       string  `json:"extension"`
+	FileRole        string  `json:"file_role"`
+	Language        string  `json:"language"`
+	FileSize        int64   `json:"file_size"`
+	ChunkIndex      int     `json:"chunk_index"`
+	StartLine       int     `json:"start_line"`
+	EndLine         int     `json:"end_line"`
+	ByteSize        int64   `json:"byte_size"`
+	ContentHash     string  `json:"content_hash"`
+	SymbolName      *string `json:"symbol_name"`
+	SymbolType      string  `json:"symbol_type"`
+	ParentSymbol    *string `json:"parent_symbol"`
+	PrevChunkIndex  *int    `json:"prev_chunk_index"`
+	NextChunkIndex  *int    `json:"next_chunk_index"`
+	SourceUnderTest string  `json:"source_under_test"`
+}
+
+// representResponse is the SAFE external shape of a representation run.
+type representResponse struct {
+	RepositoryID             string                `json:"repository_id"`
+	TotalFiles               int                   `json:"total_files"`
+	TotalChunks              int                   `json:"total_chunks"`
+	TotalBytes               int64                 `json:"total_bytes"`
+	RoleCounts               map[string]int        `json:"role_counts"`
+	Representations          []representationEntry `json:"representations"`
+	RepresentationsTruncated bool                  `json:"representations_truncated"`
+	Status                   string                `json:"status"`
+}
+
+func toRepresentResponse(repositoryID string, result *representation.Result) representResponse {
+	if result.RoleCounts == nil {
+		result.RoleCounts = make(map[string]int)
+	}
+
+	limit := maxRepresentationsInResponse
+
+	if len(result.Chunks) < limit {
+		limit = len(result.Chunks)
+	}
+
+	entries := make([]representationEntry, 0, limit)
+
+	for i := range result.Chunks[:limit] {
+		chunk := &result.Chunks[i]
+		entries = append(entries, representationEntry{
+			ID:              chunk.ID,
+			FilePath:        chunk.FilePath,
+			Directory:       chunk.Directory,
+			Extension:       chunk.Extension,
+			FileRole:        chunk.FileRole,
+			Language:        chunk.Language,
+			FileSize:        chunk.FileSize,
+			ChunkIndex:      chunk.ChunkIndex,
+			StartLine:       chunk.StartLine,
+			EndLine:         chunk.EndLine,
+			ByteSize:        chunk.ByteSize,
+			ContentHash:     chunk.ContentHash,
+			SymbolName:      chunk.SymbolName,
+			SymbolType:      chunk.SymbolType,
+			ParentSymbol:    chunk.ParentSymbol,
+			PrevChunkIndex:  chunk.PrevChunkIndex,
+			NextChunkIndex:  chunk.NextChunkIndex,
+			SourceUnderTest: chunk.SourceUnderTest,
+		})
+	}
+
+	return representResponse{
+		RepositoryID:             repositoryID,
+		TotalFiles:               result.TotalFiles,
+		TotalChunks:              result.TotalChunks,
+		TotalBytes:               result.TotalBytes,
+		RoleCounts:               result.RoleCounts,
+		Representations:          entries,
+		RepresentationsTruncated: len(result.Chunks) > maxRepresentationsInResponse,
+		Status:                   result.Status,
+	}
+}
+
+// Represent handles POST /repositories/:id/represent for the authenticated
+// user. It reuses the extract → chunk flow (ownership first, readiness gate,
+// bounded reads) and returns traceable METADATA — never chunk contents,
+// never absolute filesystem paths.
+func (h *Handler) Represent(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	result, err := h.service.RepresentRepositoryContent(c.Request.Context(), userID, id)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			// Unknown AND foreign records map identically: existence of
+			// another user's repository context is never revealed.
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, users.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found",
+			})
+		case errors.Is(err, ErrWorkspaceNotReady):
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "workspace_not_ready",
+			})
+		case errors.Is(err, filtering.ErrTimeout), errors.Is(err, extraction.ErrTimeout):
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"error": "extract_timeout",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, toRepresentResponse(id.String(), result))
+}
+
+// maxIndexedFilesInResponse caps how many indexed file paths the
+// indexed-files endpoint returns; the count always reflects the full set.
+const maxIndexedFilesInResponse = 1000
+
+// maxIndexedRecordsInResponse caps how many metadata records the lookup
+// endpoint returns; the count always reflects the full matching set.
+const maxIndexedRecordsInResponse = 1000
+
+// indexResponse is the SAFE external shape of an index rebuild. It carries
+// aggregate counts only — never source content, never absolute filesystem
+// paths.
+type indexResponse struct {
+	RepositoryID string `json:"repository_id"`
+	Files        int    `json:"files"`
+	Chunks       int    `json:"chunks"`
+	Status       string `json:"status"`
+}
+
+// Index handles POST /repositories/:id/index for the authenticated user. It
+// rebuilds the in-memory metadata index for the owned repository by running
+// the full representation pipeline and atomically replacing the previous
+// snapshot. The response carries aggregate counts only — never source
+// content, never absolute filesystem paths.
+func (h *Handler) Index(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	result, err := h.service.IndexRepositoryContent(c.Request.Context(), userID, id)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			// Unknown AND foreign records map identically: existence of
+			// another user's repository context is never revealed.
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		case errors.Is(err, users.ErrNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found",
+			})
+		case errors.Is(err, ErrWorkspaceNotReady):
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "workspace_not_ready",
+			})
+		case errors.Is(err, filtering.ErrTimeout), errors.Is(err, extraction.ErrTimeout):
+			c.JSON(http.StatusGatewayTimeout, gin.H{
+				"error": "extract_timeout",
+			})
+		default:
+			// Covers indexing capacity errors and anything unexpected:
+			// internal detail is never surfaced.
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, indexResponse{
+		RepositoryID: result.RepositoryID,
+		Files:        result.Files,
+		Chunks:       result.Chunks,
+		Status:       "indexed",
+	})
+}
+
+// indexedFilesResponse is the SAFE external shape of an indexed-files query.
+// File paths are repository-relative slash paths only; absolute paths are
+// impossible by construction.
+type indexedFilesResponse struct {
+	RepositoryID   string   `json:"repository_id"`
+	Files          []string `json:"files"`
+	Count          int      `json:"count"`
+	FilesTruncated bool     `json:"files_truncated"`
+	Status         string   `json:"status"`
+}
+
+// IndexedFiles handles GET /repositories/:id/index/files for the
+// authenticated user. It returns the repository-relative file paths that
+// currently exist in the in-memory metadata index. An empty list is a valid
+// response (no index yet or an empty repository); no repository existence
+// outside the authenticated user's scope is observable.
+func (h *Handler) IndexedFiles(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	files, err := h.service.IndexedFiles(userID, id)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	limit := maxIndexedFilesInResponse
+
+	if len(files) < limit {
+		limit = len(files)
+	}
+
+	c.JSON(http.StatusOK, indexedFilesResponse{
+		RepositoryID:   id.String(),
+		Files:          files[:limit],
+		Count:          len(files),
+		FilesTruncated: len(files) > maxIndexedFilesInResponse,
+		Status:         "ok",
+	})
+}
+
+// lookupIndexedRequest is the optional query body for index lookups. Every
+// populated field restricts the result set; empty fields are not used as
+// filters. The body must be valid JSON ({} for no filters).
+type lookupIndexedRequest struct {
+	FilePath    string `json:"file_path"`
+	PathPrefix  string `json:"path_prefix"`
+	Language    string `json:"language"`
+	FileRole    string `json:"file_role"`
+	SymbolName  string `json:"symbol_name"`
+	SymbolType  string `json:"symbol_type"`
+	ChunkIndex  *int   `json:"chunk_index"`
+	ContentHash string `json:"content_hash"`
+}
+
+// indexedRecordEntry is the SAFE external shape of one indexed metadata
+// record. Source content is deliberately absent: callers can use this record
+// to locate provenance while source content stays in the upstream
+// representation flow.
+type indexedRecordEntry struct {
+	ID              string  `json:"id"`
+	FilePath        string  `json:"file_path"`
+	Directory       string  `json:"directory"`
+	Extension       string  `json:"extension"`
+	FileRole        string  `json:"file_role"`
+	Language        string  `json:"language"`
+	FileSize        int64   `json:"file_size"`
+	ChunkIndex      int     `json:"chunk_index"`
+	StartLine       int     `json:"start_line"`
+	EndLine         int     `json:"end_line"`
+	ByteSize        int64   `json:"byte_size"`
+	ContentHash     string  `json:"content_hash"`
+	SymbolName      *string `json:"symbol_name"`
+	SymbolType      string  `json:"symbol_type"`
+	ParentSymbol    *string `json:"parent_symbol"`
+	PrevChunkIndex  *int    `json:"prev_chunk_index"`
+	NextChunkIndex  *int    `json:"next_chunk_index"`
+	SourceUnderTest string  `json:"source_under_test"`
+}
+
+// lookupIndexedResponse is the SAFE external shape of an index lookup.
+type lookupIndexedResponse struct {
+	RepositoryID     string               `json:"repository_id"`
+	Records          []indexedRecordEntry `json:"records"`
+	RecordsTruncated bool                 `json:"records_truncated"`
+	Count            int                  `json:"count"`
+	Status           string               `json:"status"`
+}
+
+// LookupIndexed handles POST /repositories/:id/index/lookup for the
+// authenticated user. The request body specifies optional query dimensions;
+// every populated field restricts the result set. The response carries
+// metadata-only records — never source content, never absolute filesystem
+// paths. The result list is capped at 1000 entries; the count always
+// reflects the full matching set.
+func (h *Handler) LookupIndexed(
+	c *gin.Context,
+) {
+	userID, ok := auth.GetAuthenticatedUserID(c)
+
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized",
+		})
+		return
+	}
+
+	id, err := uuid.Parse(c.Param("id"))
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	var request lookupIndexedRequest
+
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_request",
+		})
+		return
+	}
+
+	query := indexing.Query{
+		FilePath:    request.FilePath,
+		PathPrefix:  request.PathPrefix,
+		Language:    request.Language,
+		FileRole:    request.FileRole,
+		SymbolName:  request.SymbolName,
+		SymbolType:  request.SymbolType,
+		ChunkIndex:  request.ChunkIndex,
+		ContentHash: request.ContentHash,
+	}
+
+	records, err := h.service.LookupIndexedContent(userID, id, query)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelectedNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "repository_not_found",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal",
+			})
+		}
+		return
+	}
+
+	limit := maxIndexedRecordsInResponse
+
+	if len(records) < limit {
+		limit = len(records)
+	}
+
+	entries := make([]indexedRecordEntry, 0, limit)
+
+	for _, record := range records[:limit] {
+		entries = append(entries, indexedRecordEntry{
+			ID:              record.ID,
+			FilePath:        record.FilePath,
+			Directory:       record.Directory,
+			Extension:       record.Extension,
+			FileRole:        record.FileRole,
+			Language:        record.Language,
+			FileSize:        record.FileSize,
+			ChunkIndex:      record.ChunkIndex,
+			StartLine:       record.StartLine,
+			EndLine:         record.EndLine,
+			ByteSize:        record.ByteSize,
+			ContentHash:     record.ContentHash,
+			SymbolName:      record.SymbolName,
+			SymbolType:      record.SymbolType,
+			ParentSymbol:    record.ParentSymbol,
+			PrevChunkIndex:  record.PrevChunkIndex,
+			NextChunkIndex:  record.NextChunkIndex,
+			SourceUnderTest: record.SourceUnderTest,
+		})
+	}
+
+	c.JSON(http.StatusOK, lookupIndexedResponse{
+		RepositoryID:     id.String(),
+		Records:          entries,
+		RecordsTruncated: len(records) > maxIndexedRecordsInResponse,
+		Count:            len(records),
+		Status:           "ok",
+	})
 }
