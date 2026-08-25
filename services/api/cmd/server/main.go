@@ -249,6 +249,13 @@ func main() {
 		repositoriesHandler.LookupIndexed,
 	)
 
+	// Task 3h: AI analysis over indexed repository context.
+	router.POST(
+		"/repositories/:id/analyze",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Analyze,
+	)
+
 	log.Printf("server running on :%s", cfg.Port)
 
 	err = router.Run(":" + cfg.Port)
