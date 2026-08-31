@@ -67,7 +67,7 @@ func main() {
 		ghClient,
 		cfg.GitHubTokenEncryptionKey,
 	)
-	authHandler := auth.NewHandler(authService)
+	authHandler := auth.NewHandler(authService, cfg.FrontendURL)
 
 	// The controlled workspace root is REQUIRED and validated at startup:
 	// repository workspaces are never written to arbitrary locations.
