@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 
 	"github.com/gin-gonic/gin"
 
@@ -17,20 +18,27 @@ const (
 	oauthCookieSecure = false
 )
 
+// frontendCallbackPath is the frontend route that receives the Aevor JWT
+// after a successful OAuth callback (as ?token=<jwt>).
+const frontendCallbackPath = "/auth/callback"
+
 type oauthStateCookie struct {
 	State    string `json:"state"`
 	Verifier string `json:"verifier"`
 }
 
 type Handler struct {
-	service *Service
+	service     *Service
+	frontendURL string
 }
 
 func NewHandler(
 	service *Service,
+	frontendURL string,
 ) *Handler {
 	return &Handler{
-		service: service,
+		service:     service,
+		frontendURL: frontendURL,
 	}
 }
 
@@ -139,10 +147,15 @@ func (h *Handler) GitHubCallback(
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"token": authToken,
-		"user":  users.ToUserResponse(user),
-	})
+	// Success: redirect the browser to the frontend callback route carrying
+	// ONLY the Aevor JWT. The browser stores it client-side. The GitHub
+	// access token is never transmitted here — it stays encrypted server-side.
+	dest := h.frontendURL + frontendCallbackPath + "?token=" + url.QueryEscape(authToken)
+	c.Redirect(http.StatusFound, dest)
+
+	// user is intentionally unused on the success path: the frontend fetches
+	// its own profile via GET /users/me rather than round-tripping it here.
+	_ = user
 }
 
 func (h *Handler) GetMe(
