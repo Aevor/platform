@@ -23,6 +23,11 @@ type AppConfig struct {
 	GitHubClientID     string
 	GitHubClientSecret string
 	GitHubRedirectURL  string
+
+	// FrontendURL is the base URL of the Aevor frontend (FRONTEND_URL).
+	// After a successful GitHub OAuth callback the API redirects the browser
+	// here (e.g. http://localhost:5173) so the SPA can capture the JWT.
+	FrontendURL string
 	// GitHubBaseURL optionally overrides the GitHub REST API base URL
 	// (GITHUB_API_BASE_URL). Empty means the production default. Used for
 	// integration testing against a local mock GitHub.
@@ -108,6 +113,7 @@ func Load() (*AppConfig, error) {
 		GitHubClientID:           os.Getenv("GITHUB_CLIENT_ID"),
 		GitHubClientSecret:       os.Getenv("GITHUB_CLIENT_SECRET"),
 		GitHubRedirectURL:        os.Getenv("GITHUB_REDIRECT_URL"),
+		FrontendURL:              os.Getenv("FRONTEND_URL"),
 		GitHubBaseURL:            os.Getenv("GITHUB_API_BASE_URL"),
 		JWTSecret:                []byte(os.Getenv("JWT_SECRET")),
 		GitHubTokenEncryptionKey: encryptionKey,
@@ -151,6 +157,10 @@ func (c *AppConfig) validate() error {
 
 	if c.GitHubClientID == "" || c.GitHubClientSecret == "" || c.GitHubRedirectURL == "" {
 		return fmt.Errorf("github oauth configuration is incomplete (GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_REDIRECT_URL are required)")
+	}
+
+	if c.FrontendURL == "" {
+		return fmt.Errorf("FRONTEND_URL is required (base URL the API redirects the SPA to after OAuth)")
 	}
 
 	if len(c.JWTSecret) < 32 {
