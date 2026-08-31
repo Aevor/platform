@@ -1563,6 +1563,10 @@ func (h *Handler) Analyze(
 			c.JSON(http.StatusNotFound, gin.H{
 				"error": "repository_not_found",
 			})
+		case errors.Is(err, ErrWorkspaceNotReady):
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "workspace_not_ready",
+			})
 		case errors.Is(err, ai.ErrUnavailable),
 			errors.Is(err, ai.ErrTimeout):
 			c.JSON(http.StatusServiceUnavailable, gin.H{

@@ -905,16 +905,22 @@ type AnalyzeResult struct {
 //
 //  1. Verify ownership via JWT-derived userID (same as every other method)
 //  2. Fail closed if aiClient is nil (AI not configured)
-//  3. Look up indexed metadata via index.Lookup (no filesystem access)
-//  4. Assemble bounded ContextChunks from index records (metadata only)
-//  5. Build AnalyzeRequest with repository identity + query + chunks
-//  6. Call aiClient.Analyze (HTTP to separate AI service)
-//  7. Return wrapped response
+//  3. Re-run the bounded representation pipeline to obtain the actual source
+//     content for the owned selected repository (the metadata-only index does
+//     not and must not carry content)
+//  4. Look up indexed metadata via index.Lookup for the record set
+//  5. Assemble bounded ContextChunks, enriching each from the represented
+//     source content (matching by deterministic Task 3f identity)
+//  6. Build AnalyzeRequest with repository identity + query + chunks
+//  7. Call aiClient.Analyze (HTTP to separate AI service)
+//  8. Return wrapped response
 //
-// Security: the request carries ONLY repository identity and bounded metadata
-// chunks. NEVER GitHub tokens, JWT secrets, encryption keys, credentials,
-// or environment variables. Raw source code is NOT included — only indexed
-// metadata (file paths, languages, symbols, line ranges).
+// Security: the request carries ONLY repository identity, user query, and
+// bounded context chunks (each within the shared extraction budget; truncated
+// further to maxChunkContent bytes by the AI client). NEVER GitHub tokens,
+// JWT secrets, encryption keys, credentials, or environment variables. Source
+// content is provided so the AI model can reason over the actual codebase,
+// but it stays bounded and is forwarded to the SEPARATE AI service only.
 func (s *Service) AnalyzeRepositoryContent(
 	ctx context.Context,
 	userID uuid.UUID,
@@ -928,6 +934,19 @@ func (s *Service) AnalyzeRepositoryContent(
 	selected, err := s.store.FindByUserAndID(userID, selectedRepositoryID)
 	if err != nil {
 		return nil, err
+	}
+
+	// The source content lives only in the bounded representation pipeline;
+	// the metadata-only index deliberately drops it. Re-run representation so
+	// each chunk's actual code can be sent as context.
+	represented, err := s.RepresentRepositoryContent(ctx, userID, selected.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	contentByID := make(map[string]string, len(represented.Chunks))
+	for i := range represented.Chunks {
+		contentByID[represented.Chunks[i].ID] = represented.Chunks[i].Content
 	}
 
 	records := s.index.Lookup(indexing.Query{
@@ -957,6 +976,12 @@ func (s *Service) AnalyzeRepositoryContent(
 		if record.ParentSymbol != nil {
 			chunk.ParentSymbol = record.ParentSymbol
 		}
+
+		// Enrich with the actual bounded source content for this chunk. If the
+		// deterministic ID has no matching representation (should not happen
+		// when index and representation come from the same pipeline), the
+		// chunk is still sent but without content.
+		chunk.Content = contentByID[record.ID]
 
 		chunks = append(chunks, chunk)
 	}
