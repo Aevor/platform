@@ -115,8 +115,8 @@ func TestAnalyze_SuccessfulRequestShape(t *testing.T) {
 		t.Fatalf("Analyze: %v", err)
 	}
 
-	if requestPath != defaultEndpoint {
-		t.Errorf("path = %q, want %q", requestPath, defaultEndpoint)
+	if requestPath != defaultAnalyzeEndpoint {
+		t.Errorf("path = %q, want %q", requestPath, defaultAnalyzeEndpoint)
 	}
 
 	if authHeader != "Bearer server-key-xyz" {
@@ -478,6 +478,212 @@ func TestAnalyze_SecretAPIKeyNeverInBody(t *testing.T) {
 
 	if strings.Contains(rawBody, "api-key-ABCDEF") {
 		t.Error("API key leaked into request body")
+	}
+}
+
+// validGenerateRequest returns a GenerateChangesRequest that passes
+// validateGenerateRequest.
+func validGenerateRequest() *GenerateChangesRequest {
+	return &GenerateChangesRequest{
+		RepositoryID:   "bbbbbbbb-0f00-0000-0000-000000000001",
+		RepositoryName: "octocat/hello-world",
+		Language:       "go",
+		Issue: IssueInfo{
+			Number:      42,
+			Title:       "Fix the Alpha flow",
+			State:       "open",
+			AuthorLogin: "octocat",
+		},
+		IssueAnalysis: AnalyzeIssueResponse{
+			Summary:       "root cause found",
+			RootCause:     "the Alpha body mishandles X",
+			AffectedFiles: []string{"main.go"},
+			Status:        "analyzed",
+		},
+		SolutionProposal: ProposeSolutionResponse{
+			Summary:  "refactor Alpha",
+			Approach: "split the Alpha body into a helper",
+			Risks:    []string{"rename risk"},
+			Status:   "proposed",
+		},
+		ContextChunks: []ContextChunk{
+			{
+				ID:         "chunk-1",
+				FilePath:   "main.go",
+				Language:   "go",
+				FileRole:   "source",
+				ChunkIndex: 0,
+				StartLine:  4,
+				EndLine:    6,
+				Content:    "func Alpha() {\n\treturn 1\n}",
+				SymbolType: "function",
+			},
+		},
+	}
+}
+
+func TestGenerateChanges_SuccessfulRequestShape(t *testing.T) {
+	var received map[string]interface{}
+	var authHeader, requestPath string
+
+	server := captureServer(t, 0, `{"summary":"fix Alpha","changes":[{"file_path":"main.go","operation":"modify","rationale":"fix","proposed_content":"x"}],"tests":[],"assumptions":["a"],"uncertainty":"low","status":"generated"}`,
+		func(r *http.Request, raw []byte) {
+			requestPath = r.URL.Path
+			authHeader = r.Header.Get("Authorization")
+			_ = json.Unmarshal(raw, &received)
+		})
+	defer server.Close()
+
+	client := NewClient(nil, WithBaseURL(server.URL), WithAPIKey("server-key-xyz"))
+
+	response, err := client.GenerateChanges(context.Background(), validGenerateRequest())
+	if err != nil {
+		t.Fatalf("GenerateChanges: %v", err)
+	}
+
+	if requestPath != defaultGenerateEndpoint {
+		t.Errorf("path = %q, want %q", requestPath, defaultGenerateEndpoint)
+	}
+
+	if authHeader != "Bearer server-key-xyz" {
+		t.Errorf("Authorization = %q, want Bearer server-key-xyz", authHeader)
+	}
+
+	issue, ok := received["issue"].(map[string]interface{})
+	if !ok || issue["number"].(float64) != 42 || issue["title"] != "Fix the Alpha flow" {
+		t.Errorf("issue = %v, want number/title carried", received["issue"])
+	}
+
+	analysis, ok := received["issue_analysis"].(map[string]interface{})
+	if !ok || analysis["summary"] != "root cause found" {
+		t.Errorf("issue_analysis = %v, want analysis summary carried", received["issue_analysis"])
+	}
+
+	proposal, ok := received["solution_proposal"].(map[string]interface{})
+	if !ok || proposal["summary"] != "refactor Alpha" {
+		t.Errorf("solution_proposal = %v, want proposal summary carried", received["solution_proposal"])
+	}
+
+	if response.Summary != "fix Alpha" || len(response.Changes) != 1 {
+		t.Errorf("response = %+v, want summary=fix Alpha with 1 change", response)
+	}
+	if response.Changes[0].FilePath != "main.go" || response.Changes[0].Operation != "modify" {
+		t.Errorf("change = %+v, want main.go modify", response.Changes[0])
+	}
+}
+
+func TestGenerateChanges_RejectedRequestValidation(t *testing.T) {
+	server := captureServer(t, 0, `{"summary":"x","status":"generated"}`,
+		func(r *http.Request, raw []byte) {
+			t.Error("server should not be contacted for invalid request")
+		})
+	defer server.Close()
+
+	client := NewClient(nil, WithBaseURL(server.URL))
+
+	t.Run("empty issue title", func(t *testing.T) {
+		request := validGenerateRequest()
+		request.Issue.Title = "  "
+
+		_, err := client.GenerateChanges(context.Background(), request)
+
+		if !isError(err, ErrRejected) {
+			t.Errorf("err = %v, want ErrRejected", err)
+		}
+	})
+
+	t.Run("blank analysis summary", func(t *testing.T) {
+		request := validGenerateRequest()
+		request.IssueAnalysis.Summary = ""
+
+		_, err := client.GenerateChanges(context.Background(), request)
+
+		if !isError(err, ErrRejected) {
+			t.Errorf("err = %v, want ErrRejected", err)
+		}
+	})
+
+	t.Run("blank proposal summary", func(t *testing.T) {
+		request := validGenerateRequest()
+		request.SolutionProposal.Summary = ""
+
+		_, err := client.GenerateChanges(context.Background(), request)
+
+		if !isError(err, ErrRejected) {
+			t.Errorf("err = %v, want ErrRejected", err)
+		}
+	})
+
+	t.Run("too many chunks", func(t *testing.T) {
+		request := validGenerateRequest()
+		for i := 0; i < maxContextChunks+1; i++ {
+			request.ContextChunks = append(request.ContextChunks, ContextChunk{
+				ID:       fmt.Sprintf("c%d", i),
+				FilePath: "f.go",
+			})
+		}
+
+		_, err := client.GenerateChanges(context.Background(), request)
+
+		if !isError(err, ErrRejected) {
+			t.Errorf("err = %v, want ErrRejected", err)
+		}
+	})
+}
+
+func TestGenerateChanges_ErrorTaxonomy(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr error
+	}{
+		{name: "rate limited", status: http.StatusTooManyRequests, body: `{}`, wantErr: ErrRateLimited},
+		{name: "unauthorized", status: http.StatusUnauthorized, body: `{}`, wantErr: ErrUnauthorized},
+		{name: "server error 503", status: http.StatusServiceUnavailable, body: `{}`, wantErr: ErrUnavailable},
+		{name: "server error 500", status: http.StatusInternalServerError, body: `{}`, wantErr: ErrUnavailable},
+		{name: "other 4xx", status: http.StatusBadRequest, body: `{}`, wantErr: ErrAPIError},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := captureServer(t, tc.status, tc.body, nil)
+			defer server.Close()
+
+			client := NewClient(nil, WithBaseURL(server.URL))
+
+			_, err := client.GenerateChanges(context.Background(), validGenerateRequest())
+
+			if !isError(err, tc.wantErr) {
+				t.Errorf("err = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestGenerateChanges_InvalidResponse(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "not json", body: `not-json`},
+		{name: "missing summary", body: `{"status":"generated"}`},
+		{name: "truncated payload after valid json", body: `{"summary":"x","changes":[],"tests":[],"status":"generated"} trailing`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := captureServer(t, 0, tc.body, nil)
+			defer server.Close()
+
+			client := NewClient(nil, WithBaseURL(server.URL))
+
+			_, err := client.GenerateChanges(context.Background(), validGenerateRequest())
+
+			if !isError(err, ErrInvalidResponse) {
+				t.Errorf("err = %v, want ErrInvalidResponse", err)
+			}
+		})
 	}
 }
 
