@@ -149,6 +149,24 @@ func main() {
 	)
 
 	router.GET(
+		"/contribution-summary",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.GetContributionSummary,
+	)
+
+	router.GET(
+		"/skills",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.GetSkills,
+	)
+
+	router.GET(
+		"/recommendations",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.GetRecommendations,
+	)
+
+	router.GET(
 		"/repositories",
 		auth.RequireAuth(jwtManager),
 		repositoriesHandler.List,
@@ -231,12 +249,31 @@ func main() {
 
 	// Task 3g: metadata-only index over represented chunks. Three
 	// endpoints: rebuild, list files, and query.
+	// router.POST(
+	// 	"/repositories/:id/index",
+
+	// router.POST(
+	// 	"/repositories/:id/prepare",
+	// 	auth.RequireAuth(jwtManager),
+	// 	repositoriesHandler.Prepare,
+	// )
+	// 	auth.RequireAuth(jwtManager),
+	// 	repositoriesHandler.Index,
+	// )
+
+	// Task 3g: metadata-only index over represented chunks. Three
+	// endpoints: rebuild, list files, and query.
 	router.POST(
 		"/repositories/:id/index",
 		auth.RequireAuth(jwtManager),
 		repositoriesHandler.Index,
 	)
 
+	router.POST(
+		"/repositories/:id/prepare",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.Prepare,
+	)
 	router.GET(
 		"/repositories/:id/index/files",
 		auth.RequireAuth(jwtManager),
@@ -254,6 +291,90 @@ func main() {
 		"/repositories/:id/analyze",
 		auth.RequireAuth(jwtManager),
 		repositoriesHandler.Analyze,
+	)
+
+	// Task 3h read-back: durable, ownership-gated codebase analysis history.
+	router.GET(
+		"/repositories/:id/analyses",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.ListAnalyses,
+	)
+
+	// Repository Impact Analysis: what may be affected by a proposed target
+	// (file/symbol) or a generated change set. Deterministic direct/possible
+	// impact, optionally enriched with grounded AI semantic findings.
+	router.POST(
+		"/repositories/:id/impact-analysis",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.AnalyzeImpact,
+	)
+
+	// Issue solution pipeline: structured issue analysis, solution proposal,
+	// and generate-changes (reviewable diff). These produce reviewable output
+	// only — never commits, pushes, or PRs.
+	router.POST(
+		"/repositories/:id/issues/:issueID/analyze",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.AnalyzeIssue,
+	)
+
+	router.POST(
+		"/repositories/:id/issues/:issueID/propose",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.ProposeSolution,
+	)
+
+	router.POST(
+		"/repositories/:id/issues/:issueID/generate-changes",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.GenerateChanges,
+	)
+
+	// Change-set workflow: explicit user approval, controlled apply of the
+	// exact approved change set into the local workspace, and structured
+	// validation of the applied result. Apply never commits or pushes.
+	router.POST(
+		"/repositories/:id/issues/:issueID/changes/:changeSetID/approve",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.ApproveChangeSet,
+	)
+
+	router.POST(
+		"/repositories/:id/issues/:issueID/changes/:changeSetID/apply",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.ApplyChangeSet,
+	)
+
+	router.POST(
+		"/repositories/:id/issues/:issueID/changes/:changeSetID/validate",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.ValidateChangeSet,
+	)
+
+	// Delivery: publish a validated change set as branch → commit → push →
+	// pull request. Idempotent and never destructive: a divergent remote
+	// branch is refused, an existing open PR for head+base is reused.
+	router.POST(
+		"/repositories/:id/issues/:issueID/changes/:changeSetID/publish",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.PublishChangeSet,
+	)
+
+	// PR details: the live GitHub view of one pull request (record, CI
+	// checks, reviews, comments, changed files) for the owned repository.
+	router.GET(
+		"/repositories/:id/pull-requests/:number",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.GetPullRequestDetails,
+	)
+
+	// PR feedback analysis: a live, grounded AI analysis of one pull
+	// request's feedback (GitHub facts + PR-scoped bounded context), with
+	// GitHub's source of truth and the AI interpretation kept separate.
+	router.POST(
+		"/repositories/:id/pull-requests/:number/analyze-feedback",
+		auth.RequireAuth(jwtManager),
+		repositoriesHandler.AnalyzePullRequestFeedback,
 	)
 
 	log.Printf("server running on :%s", cfg.Port)
