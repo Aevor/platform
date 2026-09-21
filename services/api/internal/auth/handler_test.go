@@ -49,7 +49,7 @@ func oauthCookiePayload(t *testing.T, rec *httptest.ResponseRecorder) string {
 func TestGitHubLogin_RedirectsToAuthorizationURL(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	handler := NewHandler(newTestAuthService())
+	handler := NewHandler(newTestAuthService(), testFrontendURL)
 	router := newTestLoginRouter(handler)
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/github/login", nil)
@@ -89,7 +89,7 @@ func TestGitHubLogin_RedirectsToAuthorizationURL(t *testing.T) {
 func TestGitHubLogin_SetsOAuthCookieAttributes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	handler := NewHandler(newTestAuthService())
+	handler := NewHandler(newTestAuthService(), testFrontendURL)
 	router := newTestLoginRouter(handler)
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/github/login", nil)
@@ -127,7 +127,7 @@ func TestGitHubLogin_SetsOAuthCookieAttributes(t *testing.T) {
 func TestGitHubLogin_StateAndChallengeMatchCookie(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	handler := NewHandler(newTestAuthService())
+	handler := NewHandler(newTestAuthService(), testFrontendURL)
 	router := newTestLoginRouter(handler)
 
 	req := httptest.NewRequest(http.MethodGet, "/auth/github/login", nil)
@@ -173,7 +173,7 @@ func TestGitHubLogin_DoesNotLogSensitiveValues(t *testing.T) {
 		gin.DefaultWriter = oldWriter
 	}()
 
-	handler := NewHandler(newTestAuthService())
+	handler := NewHandler(newTestAuthService(), testFrontendURL)
 
 	router := gin.New()
 	router.Use(gin.Logger())
