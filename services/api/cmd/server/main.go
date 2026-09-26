@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +19,8 @@ import (
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/indexing"
+	"github.com/Aevor/platform/services/api/internal/jobs"
+	"github.com/Aevor/platform/services/api/internal/ratelimit"
 	"github.com/Aevor/platform/services/api/internal/repositories"
 	"github.com/Aevor/platform/services/api/internal/representation"
 	"github.com/Aevor/platform/services/api/internal/users"
@@ -24,6 +30,9 @@ import (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	cfg, err := config.Load()
 
 	if err != nil {
@@ -62,12 +71,12 @@ func main() {
 
 	authService := auth.NewService(
 		oauthConfig,
-		userService,
-		jwtManager,
 		ghClient,
-		cfg.GitHubTokenEncryptionKey,
+		userService,
+		[]byte(cfg.JWTSecret),
+		[]byte(cfg.GitHubTokenEncryptionKey),
 	)
-	authHandler := auth.NewHandler(authService, cfg.FrontendURL)
+	authHandler := auth.NewHandler(authService, cfg.OAuthCookieSecure)
 
 	// The controlled workspace root is REQUIRED and validated at startup:
 	// repository workspaces are never written to arbitrary locations.
@@ -109,14 +118,48 @@ func main() {
 		representation.NewService(),
 		indexing.New(indexing.Options{}),
 		aiClient,
+		cfg.GitHubWebhookSecret,
+		nil, // jobService set after registration
 	)
+
+	// Create job service for background work.
+	jobStore := jobs.NewMemoryStore()
+	jobRegistry := jobs.NewRegistry()
+	repositories.RegisterJobDefinitions(jobRegistry, repositoriesService)
+	jobService, err := jobs.NewService(jobStore, jobs.Options{
+		Registry: jobRegistry,
+		Recorder: repositoriesService,
+	})
+	if err != nil {
+		log.Fatal("failed to create job service: ", err)
+	}
+	repositoriesService.SetJobsService(jobService)
+
 	// Clone-URL policy from configuration (production default: https to
 	// github.com only; file:// is a documented local-development opt-in).
 	repositoriesService.ConfigureCloneURLPolicy(
 		cfg.CloneAllowedHosts,
 		cfg.CloneAllowFileTransport,
 	)
-	repositoriesHandler := repositories.NewHandler(repositoriesService)
+	repositoriesHandler := repositories.NewHandlerWithJobs(repositoriesService, jobService)
+
+	// Set DB on webhook store so it can persist targets.
+	repositoriesService.GetWebhookStore().SetDB(db)
+
+	// Start job worker in background.
+	jobWorker := jobs.NewWorker(jobService, "api-worker", jobs.WorkerOptions{})
+	go jobWorker.Start()
+	defer jobWorker.Shutdown(ctx)
+
+	// Rate limiter for public endpoints (auth, webhooks)
+	rateLimiter := ratelimit.NewInMemoryLimiter()
+	authRateLimit := ratelimit.NewRateLimitMiddleware(
+		rateLimiter,
+		ratelimit.DefaultIPKey,
+		cfg.RateLimitRequestsPerMin,
+		cfg.RateLimitRequestsPerHour,
+		cfg.RateLimitBurst,
+	).Handler()
 
 	router := gin.New()
 	router.Use(
@@ -132,20 +175,43 @@ func main() {
 		})
 	})
 
+	router.GET("/health/ready", func(c *gin.Context) {
+		sqlDB, err := db.DB()
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status": "not_ready",
+				"reason": "database connection unavailable",
+			})
+			return
+		}
+		if err := sqlDB.PingContext(c.Request.Context()); err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"status": "not_ready",
+				"reason": "database ping failed",
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"status": "ready",
+		})
+	})
+
 	router.GET(
 		"/auth/github/login",
+		authRateLimit,
 		authHandler.GitHubLogin,
 	)
 
 	router.GET(
 		"/auth/github/callback",
+		authRateLimit,
 		authHandler.GitHubCallback,
 	)
 
 	router.GET(
 		"/users/me",
 		auth.RequireAuth(jwtManager),
-		authHandler.GetMe,
+		authHandler.Me,
 	)
 
 	router.GET(
