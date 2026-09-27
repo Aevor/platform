@@ -47,13 +47,15 @@ const (
 	defaultAnalyzeIssueEndpoint = "/v1/analyze-issue"
 	defaultProposeEndpoint      = "/v1/propose-solution"
 	defaultGenerateEndpoint     = "/v1/generate-changes"
-	defaultPRFeedbackEndpoint   = "/v1/analyze-pr-feedback"
-	defaultImpactEndpoint       = "/v1/analyze-impact"
+	defaultAnalyzeRepository    = "/v1/analyze-repository"
 	clientTimeout               = 30 * time.Second
 	maxResponseSize             = 4 << 20
 	maxContextChunks            = 128
 	maxQueryLength              = 4096
 	maxChunkContent             = 8192
+	maxRepositoryContextText    = 4096
+	maxRepositoryContextStrings = 64
+	maxRepositoryEntries        = 32
 )
 
 // ContextChunk is the bounded metadata unit sent to the AI service. It
@@ -287,18 +289,39 @@ func validateRequest(request *AnalyzeRequest) error {
 	return nil
 }
 
+// untrustedDataMarker fences prompt-injection-sensitive text (the user query
+// and repository source content) so the model can always tell Aevor's
+// instructions apart from data it was handed.
+const untrustedDataMarker = "[[UNTRUSTED_DATA]]"
+
 // sanitizeRequest applies safety limits to the request before transmission.
 // Content is truncated to maxChunkContent bytes; oversized chunks are not
 // rejected outright because their metadata may still be useful to the model.
+// Untrusted data (query, chunk content) is wrapped with prompt injection
+// markers to reduce the risk of instruction override.
 func sanitizeRequest(request *AnalyzeRequest) *AnalyzeRequest {
 	sanitized := *request
 	sanitized.ContextChunks = make([]ContextChunk, len(request.ContextChunks))
+
+	// Wrap the query with prompt injection markers
+	if strings.TrimSpace(sanitized.Query) != "" {
+		sanitized.Query = untrustedDataMarker + " " + strings.ToLower(strings.TrimSpace(sanitized.Query)) + " " + untrustedDataMarker
+	}
 
 	for i, chunk := range request.ContextChunks {
 		c := chunk
 
 		if len(c.Content) > maxChunkContent {
 			c.Content = c.Content[:maxChunkContent]
+		}
+
+		// Chunk content is repository-controlled text, so it is fenced with the
+		// same prompt-injection markers as the query before it can reach the
+		// model. The content itself is forwarded VERBATIM: source code is
+		// case-sensitive, and rewriting it would corrupt the very evidence the
+		// model is asked to reason about.
+		if strings.TrimSpace(c.Content) != "" {
+			c.Content = untrustedDataMarker + " " + c.Content + " " + untrustedDataMarker
 		}
 
 		sanitized.ContextChunks[i] = c
@@ -335,6 +358,71 @@ func validateResponse(response *AnalyzeResponse) error {
 	return nil
 }
 
+// validateRepositoryResponse validates the AnalyzeRepositoryResponse.
+func validateRepositoryResponse(response *AnalyzeRepositoryResponse) error {
+	if strings.TrimSpace(response.Overview) == "" {
+		return fmt.Errorf("overview required")
+	}
+
+	if strings.TrimSpace(response.Status) == "" {
+		return fmt.Errorf("status required")
+	}
+
+	if len(response.Components) > maxRepositoryEntries {
+		return fmt.Errorf("components exceeds %d entries", maxRepositoryEntries)
+	}
+
+	for i, component := range response.Components {
+		if strings.TrimSpace(component.Name) == "" {
+			return fmt.Errorf("components[%d].name required", i)
+		}
+		if strings.TrimSpace(component.Kind) == "" {
+			return fmt.Errorf("components[%d].kind required", i)
+		}
+	}
+
+	if len(response.Relationships) > maxRepositoryEntries {
+		return fmt.Errorf("relationships exceeds %d entries", maxRepositoryEntries)
+	}
+
+	for i, rel := range response.Relationships {
+		if strings.TrimSpace(rel.From) == "" {
+			return fmt.Errorf("relationships[%d].from required", i)
+		}
+		if strings.TrimSpace(rel.To) == "" {
+			return fmt.Errorf("relationships[%d].to required", i)
+		}
+		if strings.TrimSpace(rel.Kind) == "" {
+			return fmt.Errorf("relationships[%d].kind required", i)
+		}
+	}
+
+	if len(response.Conventions) > maxRepositoryEntries {
+		return fmt.Errorf("conventions exceeds %d entries", maxRepositoryEntries)
+	}
+
+	for i, conv := range response.Conventions {
+		if strings.TrimSpace(conv.Name) == "" {
+			return fmt.Errorf("conventions[%d].name required", i)
+		}
+	}
+
+	return nil
+}
+
+// validateValidationResponse validates the AnalyzeValidationFailureResponse.
+func validateValidationResponse(response *AnalyzeValidationFailureResponse) error {
+	if strings.TrimSpace(response.Summary) == "" {
+		return fmt.Errorf("summary required")
+	}
+
+	if strings.TrimSpace(response.Status) == "" {
+		return fmt.Errorf("status required")
+	}
+
+	return nil
+}
+
 // IssueInfo carries the bounded metadata of a synced issue for AI requests.
 // The issue body is intentionally excluded — it is not persisted.
 type IssueInfo struct {
@@ -353,6 +441,12 @@ type AnalyzeIssueRequest struct {
 	Language       string         `json:"language,omitempty"`
 	Issue          IssueInfo      `json:"issue"`
 	ContextChunks  []ContextChunk `json:"context_chunks"`
+
+	// RepositoryContext carries the caller's persisted, revision-bound
+	// deterministic repository profile. It is omitted entirely when no fresh
+	// profile exists, so the AI service is never told about structure Aevor
+	// cannot currently attest.
+	RepositoryContext *RepositoryContext `json:"repository_context,omitempty"`
 }
 
 // AnalyzeIssueResponse is the structured result from issue analysis.
@@ -422,6 +516,191 @@ type GenerateChangesResponse struct {
 	Status      string       `json:"status"`
 }
 
+// RepositoryStructure is the compact deterministic structure sent to the AI
+// service for repository-level analysis. It contains only bounded,
+// repository-derived facts.
+type RepositoryStructure struct {
+	Languages   []string `json:"languages"`
+	Files       int      `json:"files"`
+	Chunks      int      `json:"chunks"`
+	EntryPoints []string `json:"entry_points"`
+	AppScopes   []string `json:"app_scopes"`
+	ConfigFiles []string `json:"config_files"`
+	TestFiles   []string `json:"test_files"`
+	BuildFiles  []string `json:"build_files"`
+}
+
+// AnalyzeRepositoryRequest is the controlled payload sent to the AI service for
+// repository architecture analysis. It carries repository identity and the
+// deterministic structure. It NEVER carries: GitHub tokens, JWT secrets,
+// encryption keys, credentials, or environment variables.
+type AnalyzeRepositoryRequest struct {
+	RepositoryID   string              `json:"repository_id"`
+	RepositoryName string              `json:"repository_name"`
+	Language       string              `json:"language,omitempty"`
+	Structure      RepositoryStructure `json:"structure"`
+}
+
+// AnalyzeRepositoryComponent is one architecture component returned by the AI.
+type AnalyzeRepositoryComponent struct {
+	Name             string   `json:"name"`
+	Kind             string   `json:"kind"`
+	Path             string   `json:"path"`
+	Description      string   `json:"description"`
+	Responsibilities []string `json:"responsibilities"`
+}
+
+// AnalyzeRepositoryRelationship is one architecture relationship returned by the AI.
+type AnalyzeRepositoryRelationship struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Kind string `json:"kind"`
+}
+
+// AnalyzeRepositoryConvention is one convention returned by the AI.
+type AnalyzeRepositoryConvention struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Evidence    []string `json:"evidence"`
+}
+
+// AnalyzeRepositoryResponse is the structured result returned by the AI service
+// for repository analysis. The API parses and validates this; raw AI output is
+// never exposed directly.
+type AnalyzeRepositoryResponse struct {
+	Overview             string                          `json:"overview"`
+	Components           []AnalyzeRepositoryComponent    `json:"components"`
+	Relationships        []AnalyzeRepositoryRelationship `json:"relationships"`
+	Conventions          []AnalyzeRepositoryConvention   `json:"conventions"`
+	EngineeringDecisions []string                        `json:"engineering_decisions"`
+	Databases            []string                        `json:"databases"`
+	ExternalIntegrations []string                        `json:"external_integrations"`
+	Uncertainty          []string                        `json:"uncertainty"`
+	Status               string                          `json:"status"`
+}
+
+// RepositoryContext is the compact repository intelligence context sent to the
+// AI service for issue-level analysis. It carries only bounded,
+// repository-derived facts — never raw source code or secrets.
+type RepositoryContext struct {
+	DeterministicSummary string   `json:"deterministic_summary"`
+	Languages            []string `json:"languages"`
+	EntryPoints          []string `json:"entry_points"`
+	Components           []string `json:"components"`
+	Conventions          []string `json:"conventions"`
+	ArchitectureOverview string   `json:"architecture_overview"`
+	Relationships        []string `json:"relationships"`
+	Uncertainty          []string `json:"uncertainty"`
+}
+
+// AnalyzeRepository sends a bounded repository analysis request to the AI
+// service and returns the structured architecture response.
+func (c *Client) AnalyzeRepository(ctx context.Context, request *AnalyzeRepositoryRequest) (*AnalyzeRepositoryResponse, error) {
+	if err := validateRepositoryRequest(request); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRejected, err)
+	}
+
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrAPIError, err)
+	}
+
+	result, err := postAndParse[*AnalyzeRepositoryResponse](ctx, c, defaultAnalyzeRepository, body)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRepositoryResponse(result); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+	return result, nil
+}
+
+// validateRepositoryRequest rejects obviously invalid payloads before they leave
+// the API boundary. This catches programming errors, not adversarial input — the
+// API is the trust boundary, not the AI service.
+func validateRepositoryRequest(request *AnalyzeRepositoryRequest) error {
+	if strings.TrimSpace(request.RepositoryID) == "" {
+		return fmt.Errorf("repository_id required")
+	}
+
+	if strings.TrimSpace(request.RepositoryName) == "" {
+		return fmt.Errorf("repository_name required")
+	}
+
+	if request.Structure.Files < 0 || request.Structure.Chunks < 0 {
+		return fmt.Errorf("files and chunks must be non-negative")
+	}
+
+	if len(request.Structure.Languages) > maxRepositoryContextStrings {
+		return fmt.Errorf("languages exceeds %d entries", maxRepositoryContextStrings)
+	}
+	if len(request.Structure.EntryPoints) > maxRepositoryContextStrings {
+		return fmt.Errorf("entry_points exceeds %d entries", maxRepositoryContextStrings)
+	}
+	if len(request.Structure.AppScopes) > maxRepositoryContextStrings {
+		return fmt.Errorf("app_scopes exceeds %d entries", maxRepositoryContextStrings)
+	}
+	if len(request.Structure.ConfigFiles) > maxRepositoryContextStrings {
+		return fmt.Errorf("config_files exceeds %d entries", maxRepositoryContextStrings)
+	}
+	if len(request.Structure.TestFiles) > maxRepositoryContextStrings {
+		return fmt.Errorf("test_files exceeds %d entries", maxRepositoryContextStrings)
+	}
+	if len(request.Structure.BuildFiles) > maxRepositoryContextStrings {
+		return fmt.Errorf("build_files exceeds %d entries", maxRepositoryContextStrings)
+	}
+
+	return nil
+}
+
+// sanitizeRepositoryContext applies safety limits to the repository context
+// before transmission. String fields are truncated; oversized arrays are capped.
+func sanitizeRepositoryContext(ctx *RepositoryContext) *RepositoryContext {
+	if ctx == nil {
+		return nil
+	}
+
+	sanitized := *ctx
+
+	if len(sanitized.DeterministicSummary) > maxRepositoryContextText {
+		sanitized.DeterministicSummary = sanitized.DeterministicSummary[:maxRepositoryContextText]
+	}
+
+	sanitized.Languages = sanitizeStringSlice(sanitized.Languages, maxRepositoryContextStrings)
+	sanitized.EntryPoints = sanitizeStringSlice(sanitized.EntryPoints, maxRepositoryContextStrings)
+	sanitized.Components = sanitizeStringSlice(sanitized.Components, maxRepositoryContextStrings)
+	sanitized.Conventions = sanitizeStringSlice(sanitized.Conventions, maxRepositoryContextStrings)
+	sanitized.Relationships = sanitizeStringSlice(sanitized.Relationships, maxRepositoryContextStrings)
+	sanitized.Uncertainty = sanitizeStringSlice(sanitized.Uncertainty, maxRepositoryContextStrings)
+
+	if len(sanitized.ArchitectureOverview) > maxRepositoryContextText {
+		sanitized.ArchitectureOverview = sanitized.ArchitectureOverview[:maxRepositoryContextText]
+	}
+
+	return &sanitized
+}
+
+// sanitizeStringSlice trims each string and caps the slice length.
+func sanitizeStringSlice(slice []string, max int) []string {
+	if len(slice) == 0 {
+		return nil
+	}
+
+	out := make([]string, 0, len(slice))
+	for _, s := range slice {
+		trimmed := strings.TrimSpace(s)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+
+	if len(out) > max {
+		out = out[:max]
+	}
+
+	return out
+}
+
 // AnalyzeIssue sends a bounded issue analysis request to the AI service.
 func (c *Client) AnalyzeIssue(ctx context.Context, request *AnalyzeIssueRequest) (*AnalyzeIssueResponse, error) {
 	if err := validateIssueRequest(request); err != nil {
@@ -429,17 +708,19 @@ func (c *Client) AnalyzeIssue(ctx context.Context, request *AnalyzeIssueRequest)
 	}
 	sanitized := sanitizeContextChunks(request.ContextChunks)
 	body, err := json.Marshal(struct {
-		RepositoryID   string         `json:"repository_id"`
-		RepositoryName string         `json:"repository_name"`
-		Language       string         `json:"language,omitempty"`
-		Issue          IssueInfo      `json:"issue"`
-		ContextChunks  []ContextChunk `json:"context_chunks"`
+		RepositoryID      string             `json:"repository_id"`
+		RepositoryName    string             `json:"repository_name"`
+		Language          string             `json:"language,omitempty"`
+		Issue             IssueInfo          `json:"issue"`
+		ContextChunks     []ContextChunk     `json:"context_chunks"`
+		RepositoryContext *RepositoryContext `json:"repository_context,omitempty"`
 	}{
-		RepositoryID:   request.RepositoryID,
-		RepositoryName: request.RepositoryName,
-		Language:       request.Language,
-		Issue:          request.Issue,
-		ContextChunks:  sanitized,
+		RepositoryID:      request.RepositoryID,
+		RepositoryName:    request.RepositoryName,
+		Language:          request.Language,
+		Issue:             request.Issue,
+		ContextChunks:     sanitized,
+		RepositoryContext: sanitizeRepositoryContext(request.RepositoryContext),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrAPIError, err)
@@ -526,139 +807,6 @@ func validateGenerateChangesResponse(r *GenerateChangesResponse) error {
 		}
 		if strings.TrimSpace(change.Operation) == "" {
 			return fmt.Errorf("changes[%d].operation required", i)
-		}
-	}
-	return nil
-}
-
-// ImpactTargetRef identifies the repository element an impact analysis starts
-// from.
-type ImpactTargetRef struct {
-	FilePath string `json:"file_path"`
-	Symbol   string `json:"symbol,omitempty"`
-}
-
-// ImpactRelationship is one deterministic relationship the API already
-// derived from the repository. It is sent to the AI service as grounding: the
-// AI may explain it or surface additional semantic relationships, but it can
-// never contradict or replace it.
-type ImpactRelationship struct {
-	FromFile string `json:"from_file"`
-	ToFile   string `json:"to_file"`
-	Kind     string `json:"kind"`
-	Evidence string `json:"evidence,omitempty"`
-}
-
-// AnalyzeImpactRequest is the controlled payload for semantic impact
-// discovery. It carries repository identity, the target, the deterministic
-// direct relationships already found, and bounded context chunks. It NEVER
-// carries tokens, secrets, or credentials.
-type AnalyzeImpactRequest struct {
-	RepositoryID   string               `json:"repository_id"`
-	RepositoryName string               `json:"repository_name"`
-	Language       string               `json:"language,omitempty"`
-	Target         ImpactTargetRef      `json:"target"`
-	DirectImpacts  []ImpactRelationship `json:"direct_impacts"`
-	ContextChunks  []ContextChunk       `json:"context_chunks"`
-}
-
-// SemanticImpact is one additional POSSIBLE impact proposed by the AI service.
-// The API labels every item of this kind as inferred; it never overrides a
-// repository-derived relationship.
-type SemanticImpact struct {
-	FilePath   string  `json:"file_path"`
-	Symbol     string  `json:"symbol,omitempty"`
-	Kind       string  `json:"kind"`
-	Rationale  string  `json:"rationale"`
-	Confidence float64 `json:"confidence"`
-}
-
-// AnalyzeImpactResponse is the structured result from semantic impact
-// discovery.
-type AnalyzeImpactResponse struct {
-	Summary     string           `json:"summary"`
-	Impacts     []SemanticImpact `json:"impacts"`
-	Risks       []string         `json:"risks"`
-	Uncertainty string           `json:"uncertainty"`
-	Status      string           `json:"status"`
-}
-
-// maxSemanticImpacts bounds how many AI-proposed impacts are accepted so a
-// misbehaving service cannot flood the response.
-const maxSemanticImpacts = 128
-
-// AnalyzeImpact sends a bounded semantic impact request to the AI service and
-// returns the structured, validated response. Deterministic relationships are
-// forwarded as grounding; the response is validated but its truth is decided
-// by the caller (which filters to represented files and labels it inferred).
-func (c *Client) AnalyzeImpact(ctx context.Context, request *AnalyzeImpactRequest) (*AnalyzeImpactResponse, error) {
-	if err := validateImpactRequest(request); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrRejected, err)
-	}
-	sanitized := sanitizeContextChunks(request.ContextChunks)
-	body, err := json.Marshal(struct {
-		RepositoryID   string               `json:"repository_id"`
-		RepositoryName string               `json:"repository_name"`
-		Language       string               `json:"language,omitempty"`
-		Target         ImpactTargetRef      `json:"target"`
-		DirectImpacts  []ImpactRelationship `json:"direct_impacts"`
-		ContextChunks  []ContextChunk       `json:"context_chunks"`
-	}{
-		RepositoryID:   request.RepositoryID,
-		RepositoryName: request.RepositoryName,
-		Language:       request.Language,
-		Target:         request.Target,
-		DirectImpacts:  request.DirectImpacts,
-		ContextChunks:  sanitized,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrAPIError, err)
-	}
-	result, err := postAndParse[*AnalyzeImpactResponse](ctx, c, defaultImpactEndpoint, body)
-	if err != nil {
-		return nil, err
-	}
-	if err := validateImpactResponse(result); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
-	}
-	return result, nil
-}
-
-func validateImpactRequest(r *AnalyzeImpactRequest) error {
-	if strings.TrimSpace(r.RepositoryID) == "" {
-		return fmt.Errorf("repository_id required")
-	}
-	if strings.TrimSpace(r.RepositoryName) == "" {
-		return fmt.Errorf("repository_name required")
-	}
-	if strings.TrimSpace(r.Target.FilePath) == "" {
-		return fmt.Errorf("target.file_path required")
-	}
-	if len(r.ContextChunks) > maxContextChunks {
-		return fmt.Errorf("context_chunks exceeds %d entries", maxContextChunks)
-	}
-	return nil
-}
-
-func validateImpactResponse(r *AnalyzeImpactResponse) error {
-	if strings.TrimSpace(r.Summary) == "" {
-		return fmt.Errorf("summary required")
-	}
-	if strings.TrimSpace(r.Status) == "" {
-		return fmt.Errorf("status required")
-	}
-	if len(r.Impacts) > maxSemanticImpacts {
-		return fmt.Errorf("impacts exceeds %d entries", maxSemanticImpacts)
-	}
-	for i, item := range r.Impacts {
-		if strings.TrimSpace(item.FilePath) == "" {
-			return fmt.Errorf("impacts[%d].file_path required", i)
-		}
-		if strings.TrimSpace(item.Kind) == "" {
-			return fmt.Errorf("impacts[%d].kind required", i)
-		}
-		if item.Confidence < 0 || item.Confidence > 1 {
-			return fmt.Errorf("impacts[%d].confidence must be 0.0–1.0", i)
 		}
 	}
 	return nil
@@ -779,42 +927,141 @@ func validateGenerateRequest(r *GenerateChangesRequest) error {
 	return nil
 }
 
-// PRCheckInfo carries one CI result exactly as GitHub reported it. Status
-// preserves GitHub's own effective state; Aevor never infers a pass.
+const (
+	defaultAnalyzeValidation = "/v1/analyze-validation"
+	maxValidationChecks      = 32
+)
+
+// ValidationFailureCheck is one controlled validation check that failed.
+type ValidationFailureCheck struct {
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	Stage        string `json:"stage,omitempty"`
+	FailureClass string `json:"failure_class,omitempty"`
+	Message      string `json:"message"`
+	DurationMs   int64  `json:"duration_ms,omitempty"`
+	ExitCode     int    `json:"exit_code,omitempty"`
+}
+
+// AnalyzeValidationFailureRequest is the controlled payload sent to the AI
+// service for validation failure analysis.
+type AnalyzeValidationFailureRequest struct {
+	RepositoryID   string                   `json:"repository_id"`
+	RepositoryName string                   `json:"repository_name"`
+	Language       string                   `json:"language,omitempty"`
+	Toolchains     []string                 `json:"toolchains"`
+	FailureClass   string                   `json:"failure_class"`
+	Summary        string                   `json:"summary"`
+	Checks         []ValidationFailureCheck `json:"checks"`
+}
+
+// AnalyzeValidationFailureResponse is the structured result from validation
+// failure analysis.
+type AnalyzeValidationFailureResponse struct {
+	Summary     string   `json:"summary"`
+	RootCause   string   `json:"root_cause"`
+	Suggestions []string `json:"suggestions"`
+	Status      string   `json:"status"`
+}
+
+// AnalyzeValidationFailure sends a bounded validation failure analysis request
+// to the AI service.
+func (c *Client) AnalyzeValidationFailure(ctx context.Context, request *AnalyzeValidationFailureRequest) (*AnalyzeValidationFailureResponse, error) {
+	if err := validateValidationRequest(request); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRejected, err)
+	}
+
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrAPIError, err)
+	}
+
+	result, err := postAndParse[*AnalyzeValidationFailureResponse](ctx, c, defaultAnalyzeValidation, body)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateValidationResponse(result); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+	return result, nil
+}
+
+func validateValidationRequest(request *AnalyzeValidationFailureRequest) error {
+	if strings.TrimSpace(request.RepositoryID) == "" {
+		return fmt.Errorf("repository_id required")
+	}
+
+	if strings.TrimSpace(request.RepositoryName) == "" {
+		return fmt.Errorf("repository_name required")
+	}
+
+	if len(request.Toolchains) > maxRepositoryContextStrings {
+		return fmt.Errorf("toolchains exceeds %d entries", maxRepositoryContextStrings)
+	}
+
+	if len(request.Checks) > maxValidationChecks {
+		return fmt.Errorf("checks exceeds %d entries", maxValidationChecks)
+	}
+
+	for i, check := range request.Checks {
+		if strings.TrimSpace(check.Name) == "" {
+			return fmt.Errorf("checks[%d].name required", i)
+		}
+		if strings.TrimSpace(check.Status) == "" {
+			return fmt.Errorf("checks[%d].status required", i)
+		}
+	}
+
+	return nil
+}
+
+const (
+	defaultAnalyzePRFeedback = "/v1/analyze-pr-feedback"
+	maxPRFeedbackChecks      = 64
+	maxPRFeedbackFiles       = 128
+	maxPRFeedbackComments    = 256
+)
+
+// PRCheckInfo is one check from a pull request.
 type PRCheckInfo struct {
 	Name        string `json:"name"`
 	Status      string `json:"status"`
 	Description string `json:"description,omitempty"`
 	URL         string `json:"url,omitempty"`
-	Source      string `json:"source"`
+	Source      string `json:"source,omitempty"`
 }
 
-// PRReview carries one pull request review with GitHub's own verdict.
+// PRReview is one review on a pull request.
 type PRReview struct {
 	ID          int    `json:"id"`
 	AuthorLogin string `json:"author_login"`
 	State       string `json:"state"`
-	Body        string `json:"body"`
+	Body        string `json:"body,omitempty"`
 }
 
-// PRReviewComment carries one diff-anchored inline review comment.
+// PRReviewComment is one review comment on a pull request.
 type PRReviewComment struct {
 	ID          int    `json:"id"`
 	AuthorLogin string `json:"author_login"`
 	Body        string `json:"body"`
 	Path        string `json:"path"`
-	Line        *int   `json:"line,omitempty"`
-	DiffHunk    string `json:"diff_hunk,omitempty"`
+
+	// Line is GitHub's own 1-based anchor and stays null when GitHub anchors
+	// the comment to a file or to an outdated position. It is never faked to a
+	// real line number.
+	Line *int `json:"line"`
+
+	DiffHunk string `json:"diff_hunk,omitempty"`
 }
 
-// PRIssueComment carries one comment on the pull request's issue thread.
+// PRIssueComment is one issue-thread comment on a pull request.
 type PRIssueComment struct {
 	ID          int    `json:"id"`
 	AuthorLogin string `json:"author_login"`
 	Body        string `json:"body"`
 }
 
-// PRFileInfo carries one changed file's metadata only.
+// PRFileInfo is one changed file in a pull request.
 type PRFileInfo struct {
 	Filename  string `json:"filename"`
 	Status    string `json:"status"`
@@ -822,8 +1069,7 @@ type PRFileInfo struct {
 	Deletions int    `json:"deletions"`
 }
 
-// PullRequestInfo carries bounded pull request metadata for AI analysis.
-// The body may be empty (GitHub does not require one).
+// PullRequestInfo is the bounded metadata of a pull request for AI requests.
 type PullRequestInfo struct {
 	Number      int    `json:"number"`
 	Title       string `json:"title"`
@@ -834,40 +1080,22 @@ type PullRequestInfo struct {
 }
 
 // AnalyzePRFeedbackRequest is the controlled payload sent to the AI service
-// for pull request feedback analysis. It carries repository identity, GitHub's
-// own pull request facts (checks, reviews, comments, files), and bounded
-// context chunks. It NEVER carries: GitHub tokens, JWT secrets, encryption
-// keys, credentials, or environment variables. All free-form text is data,
-// never instructions.
+// for pull request feedback analysis.
 type AnalyzePRFeedbackRequest struct {
-	RepositoryID   string            `json:"repository_id"`
-	RepositoryName string            `json:"repository_name"`
-	Language       string            `json:"language,omitempty"`
-	PullRequest    PullRequestInfo   `json:"pull_request"`
-	Checks         []PRCheckInfo     `json:"checks"`
-	Reviews        []PRReview        `json:"reviews"`
-	ReviewComments []PRReviewComment `json:"review_comments"`
-	IssueComments  []PRIssueComment  `json:"issue_comments"`
-	Files          []PRFileInfo      `json:"files"`
-	ContextChunks  []ContextChunk    `json:"context_chunks"`
+	RepositoryID      string             `json:"repository_id"`
+	RepositoryName    string             `json:"repository_name"`
+	Language          string             `json:"language,omitempty"`
+	PullRequest       PullRequestInfo    `json:"pull_request"`
+	Checks            []PRCheckInfo      `json:"checks"`
+	Reviews           []PRReview         `json:"reviews"`
+	ReviewComments    []PRReviewComment  `json:"review_comments"`
+	IssueComments     []PRIssueComment   `json:"issue_comments"`
+	Files             []PRFileInfo       `json:"files"`
+	ContextChunks     []ContextChunk     `json:"context_chunks"`
+	RepositoryContext *RepositoryContext `json:"repository_context,omitempty"`
 }
 
-// ActionableFeedbackItem is one grounded, actionable piece of feedback.
-// Source and OriginalText reflect GitHub's own record; Recommendation and
-// Reason are the AI's interpretation and are always presented as such.
-type ActionableFeedbackItem struct {
-	Severity       string `json:"severity"`
-	Source         string `json:"source"`
-	AuthorLogin    string `json:"author_login"`
-	FilePath       string `json:"file_path"`
-	Line           *int   `json:"line,omitempty"`
-	OriginalText   string `json:"original_text"`
-	Recommendation string `json:"recommendation"`
-	Reason         string `json:"reason"`
-}
-
-// AnalyzePRFeedbackResponse is the structured result from pull request
-// feedback analysis. GitHub facts and the interpretation are kept separate.
+// AnalyzePRFeedbackResponse is the structured result from PR feedback analysis.
 type AnalyzePRFeedbackResponse struct {
 	Summary             string                   `json:"summary"`
 	Blocking            []ActionableFeedbackItem `json:"blocking"`
@@ -876,40 +1104,30 @@ type AnalyzePRFeedbackResponse struct {
 	Status              string                   `json:"status"`
 }
 
-// AnalyzePRFeedback sends a bounded pull request feedback analysis request to
-// the AI service and returns the structured, validated response.
+// ActionableFeedbackItem is one actionable feedback item from PR analysis.
+type ActionableFeedbackItem struct {
+	Severity       string `json:"severity"`
+	Source         string `json:"source"`
+	AuthorLogin    string `json:"author_login,omitempty"`
+	FilePath       string `json:"file_path,omitempty"`
+	Line           int    `json:"line,omitempty"`
+	OriginalText   string `json:"original_text,omitempty"`
+	Recommendation string `json:"recommendation,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+// AnalyzePRFeedback sends a bounded PR feedback analysis request to the AI service.
 func (c *Client) AnalyzePRFeedback(ctx context.Context, request *AnalyzePRFeedbackRequest) (*AnalyzePRFeedbackResponse, error) {
 	if err := validatePRFeedbackRequest(request); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrRejected, err)
 	}
-	sanitized := sanitizeContextChunks(request.ContextChunks)
-	body, err := json.Marshal(struct {
-		RepositoryID   string            `json:"repository_id"`
-		RepositoryName string            `json:"repository_name"`
-		Language       string            `json:"language,omitempty"`
-		PullRequest    PullRequestInfo   `json:"pull_request"`
-		Checks         []PRCheckInfo     `json:"checks"`
-		Reviews        []PRReview        `json:"reviews"`
-		ReviewComments []PRReviewComment `json:"review_comments"`
-		IssueComments  []PRIssueComment  `json:"issue_comments"`
-		Files          []PRFileInfo      `json:"files"`
-		ContextChunks  []ContextChunk    `json:"context_chunks"`
-	}{
-		RepositoryID:   request.RepositoryID,
-		RepositoryName: request.RepositoryName,
-		Language:       request.Language,
-		PullRequest:    request.PullRequest,
-		Checks:         request.Checks,
-		Reviews:        request.Reviews,
-		ReviewComments: request.ReviewComments,
-		IssueComments:  request.IssueComments,
-		Files:          request.Files,
-		ContextChunks:  sanitized,
-	})
+
+	body, err := json.Marshal(request)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrAPIError, err)
 	}
-	result, err := postAndParse[*AnalyzePRFeedbackResponse](ctx, c, defaultPRFeedbackEndpoint, body)
+
+	result, err := postAndParse[*AnalyzePRFeedbackResponse](ctx, c, defaultAnalyzePRFeedback, body)
 	if err != nil {
 		return nil, err
 	}
@@ -919,88 +1137,164 @@ func (c *Client) AnalyzePRFeedback(ctx context.Context, request *AnalyzePRFeedba
 	return result, nil
 }
 
-func validatePRFeedbackRequest(r *AnalyzePRFeedbackRequest) error {
-	if strings.TrimSpace(r.RepositoryID) == "" {
+func validatePRFeedbackRequest(request *AnalyzePRFeedbackRequest) error {
+	if strings.TrimSpace(request.RepositoryID) == "" {
 		return fmt.Errorf("repository_id required")
 	}
-	if strings.TrimSpace(r.RepositoryName) == "" {
+
+	if strings.TrimSpace(request.RepositoryName) == "" {
 		return fmt.Errorf("repository_name required")
 	}
-	if r.PullRequest.Number <= 0 {
-		return fmt.Errorf("pull_request.number must be positive")
-	}
-	if strings.TrimSpace(r.PullRequest.Title) == "" {
+
+	if strings.TrimSpace(request.PullRequest.Title) == "" {
 		return fmt.Errorf("pull_request.title required")
 	}
-	if strings.TrimSpace(r.PullRequest.HeadSHA) == "" {
-		return fmt.Errorf("pull_request.head_sha required")
+
+	if len(request.Checks) > maxPRFeedbackChecks {
+		return fmt.Errorf("checks exceeds %d entries", maxPRFeedbackChecks)
 	}
-	if len(r.ContextChunks) > maxContextChunks {
+	if len(request.Reviews) > maxPRFeedbackChecks {
+		return fmt.Errorf("reviews exceeds %d entries", maxPRFeedbackChecks)
+	}
+	if len(request.ReviewComments) > maxPRFeedbackComments {
+		return fmt.Errorf("review_comments exceeds %d entries", maxPRFeedbackComments)
+	}
+	if len(request.IssueComments) > maxPRFeedbackComments {
+		return fmt.Errorf("issue_comments exceeds %d entries", maxPRFeedbackComments)
+	}
+	if len(request.Files) > maxPRFeedbackFiles {
+		return fmt.Errorf("files exceeds %d entries", maxPRFeedbackFiles)
+	}
+	if len(request.ContextChunks) > maxContextChunks {
 		return fmt.Errorf("context_chunks exceeds %d entries", maxContextChunks)
 	}
-	for i, check := range r.Checks {
-		if strings.TrimSpace(check.Name) == "" {
-			return fmt.Errorf("checks[%d].name required", i)
-		}
-		if strings.TrimSpace(check.Status) == "" {
-			return fmt.Errorf("checks[%d].status required", i)
-		}
-	}
-	for i, review := range r.Reviews {
-		if strings.TrimSpace(review.AuthorLogin) == "" {
-			return fmt.Errorf("reviews[%d].author_login required", i)
-		}
-		if strings.TrimSpace(review.State) == "" {
-			return fmt.Errorf("reviews[%d].state required", i)
-		}
-	}
-	for i, comment := range r.ReviewComments {
-		if strings.TrimSpace(comment.AuthorLogin) == "" {
-			return fmt.Errorf("review_comments[%d].author_login required", i)
-		}
-		if strings.TrimSpace(comment.Body) == "" {
-			return fmt.Errorf("review_comments[%d].body required", i)
-		}
-	}
-	for i, comment := range r.IssueComments {
-		if strings.TrimSpace(comment.AuthorLogin) == "" {
-			return fmt.Errorf("issue_comments[%d].author_login required", i)
-		}
-		if strings.TrimSpace(comment.Body) == "" {
-			return fmt.Errorf("issue_comments[%d].body required", i)
-		}
-	}
-	for i, file := range r.Files {
-		if strings.TrimSpace(file.Filename) == "" {
-			return fmt.Errorf("files[%d].filename required", i)
-		}
-	}
+
 	return nil
 }
 
-func validatePRFeedbackResponse(r *AnalyzePRFeedbackResponse) error {
-	if strings.TrimSpace(r.Summary) == "" {
+func validatePRFeedbackResponse(response *AnalyzePRFeedbackResponse) error {
+	if strings.TrimSpace(response.Summary) == "" {
 		return fmt.Errorf("summary required")
 	}
-	if strings.TrimSpace(r.Status) == "" {
+
+	if strings.TrimSpace(response.Status) == "" {
 		return fmt.Errorf("status required")
 	}
-	validSeverities := map[string]bool{"critical": true, "warning": true, "info": true}
-	validSources := map[string]bool{"review": true, "review_comment": true, "issue_comment": true, "check": true, "general": true}
-	items := append(append([]ActionableFeedbackItem{}, r.Blocking...), r.NonBlocking...)
-	for i, item := range items {
-		if !validSeverities[item.Severity] {
-			return fmt.Errorf("items[%d].severity invalid", i)
+
+	return nil
+}
+
+const (
+	defaultAnalyzeImpact   = "/v1/analyze-impact"
+	maxImpactTargets       = 64
+	maxImpactRelationships = 256
+)
+
+// ImpactTargetRef is a reference to a target for impact analysis.
+type ImpactTargetRef struct {
+	FilePath string `json:"file_path"`
+	Symbol   string `json:"symbol,omitempty"`
+}
+
+// ImpactRelationship represents a direct relationship between files/symbols.
+type ImpactRelationship struct {
+	FromFile string `json:"from_file"`
+	ToFile   string `json:"to_file"`
+	Kind     string `json:"kind"`
+	Evidence string `json:"evidence,omitempty"`
+}
+
+// AnalyzeImpactRequest is the controlled payload sent to the AI service
+// for impact analysis.
+type AnalyzeImpactRequest struct {
+	RepositoryID      string               `json:"repository_id"`
+	RepositoryName    string               `json:"repository_name"`
+	Language          string               `json:"language,omitempty"`
+	Target            ImpactTargetRef      `json:"target"`
+	DirectImpacts     []ImpactRelationship `json:"direct_impacts"`
+	ContextChunks     []ContextChunk       `json:"context_chunks"`
+	RepositoryContext *RepositoryContext   `json:"repository_context,omitempty"`
+}
+
+// AnalyzeImpactResponse is the structured result from impact analysis.
+type AnalyzeImpactResponse struct {
+	Summary     string           `json:"summary"`
+	Impacts     []ImpactAIResult `json:"impacts"`
+	Risks       []string         `json:"risks"`
+	Uncertainty string           `json:"uncertainty"`
+	Status      string           `json:"status"`
+}
+
+// ImpactAIResult is one AI-proposed impact.
+type ImpactAIResult struct {
+	FilePath   string  `json:"file_path"`
+	Symbol     string  `json:"symbol,omitempty"`
+	Kind       string  `json:"kind"`
+	Confidence float64 `json:"confidence"`
+	Rationale  string  `json:"rationale,omitempty"`
+}
+
+// AnalyzeImpact sends a bounded impact analysis request to the AI service.
+func (c *Client) AnalyzeImpact(ctx context.Context, request *AnalyzeImpactRequest) (*AnalyzeImpactResponse, error) {
+	if err := validateImpactRequest(request); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRejected, err)
+	}
+
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrAPIError, err)
+	}
+
+	result, err := postAndParse[*AnalyzeImpactResponse](ctx, c, defaultAnalyzeImpact, body)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateImpactResponse(result); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+	return result, nil
+}
+
+func validateImpactRequest(request *AnalyzeImpactRequest) error {
+	if strings.TrimSpace(request.RepositoryID) == "" {
+		return fmt.Errorf("repository_id required")
+	}
+
+	if strings.TrimSpace(request.RepositoryName) == "" {
+		return fmt.Errorf("repository_name required")
+	}
+
+	if strings.TrimSpace(request.Target.FilePath) == "" {
+		return fmt.Errorf("target.file_path required")
+	}
+
+	if len(request.DirectImpacts) > maxImpactRelationships {
+		return fmt.Errorf("direct_impacts exceeds %d entries", maxImpactRelationships)
+	}
+	if len(request.ContextChunks) > maxContextChunks {
+		return fmt.Errorf("context_chunks exceeds %d entries", maxContextChunks)
+	}
+
+	return nil
+}
+
+func validateImpactResponse(response *AnalyzeImpactResponse) error {
+	if strings.TrimSpace(response.Summary) == "" {
+		return fmt.Errorf("summary required")
+	}
+
+	if strings.TrimSpace(response.Status) == "" {
+		return fmt.Errorf("status required")
+	}
+
+	for i, impact := range response.Impacts {
+		if strings.TrimSpace(impact.FilePath) == "" {
+			return fmt.Errorf("impacts[%d].file_path required", i)
 		}
-		if !validSources[item.Source] {
-			return fmt.Errorf("items[%d].source invalid", i)
-		}
-		if strings.TrimSpace(item.Recommendation) == "" {
-			return fmt.Errorf("items[%d].recommendation required", i)
-		}
-		if strings.TrimSpace(item.Reason) == "" {
-			return fmt.Errorf("items[%d].reason required", i)
+		if impact.Confidence < 0 || impact.Confidence > 1 {
+			return fmt.Errorf("impacts[%d].confidence must be 0.0–1.0", i)
 		}
 	}
+
 	return nil
 }
