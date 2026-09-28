@@ -195,7 +195,7 @@ func newCallbackService(tokenURL, userURL string) (*Service, *fakeUserRepository
 			TokenURL:  tokenURL,
 			AuthStyle: oauth2.AuthStyleInParams,
 		},
-	}, userService, newTestJWTManager(), ghClient, testEncryptionKey), userRepo
+	}, ghClient, userService, testJWTSecret, testEncryptionKey), userRepo
 }
 
 func newCallbackRouter(handler *Handler) *gin.Engine {
@@ -1124,7 +1124,7 @@ func TestCallback_EncryptionFailureDoesNotPersist(t *testing.T) {
 			TokenURL:  te.server.URL,
 			AuthStyle: oauth2.AuthStyleInParams,
 		},
-	}, userService, nil, ghClient, []byte("too-short"))
+	}, ghClient, userService, testJWTSecret, []byte("too-short"))
 	handler := NewHandler(service, testFrontendURL)
 	router := newCallbackRouter(handler)
 
@@ -1294,7 +1294,7 @@ func TestCallback_JWTSigningFailureHandledSafely(t *testing.T) {
 			TokenURL:  te.server.URL,
 			AuthStyle: oauth2.AuthStyleInParams,
 		},
-	}, userService, NewJWTManager([]byte("too-short")), ghClient, testEncryptionKey)
+	}, ghClient, userService, []byte("too-short"), testEncryptionKey)
 	handler := NewHandler(service, testFrontendURL)
 	router := newCallbackRouter(handler)
 
