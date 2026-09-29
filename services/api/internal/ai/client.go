@@ -52,6 +52,10 @@ const (
 	maxResponseSize             = 4 << 20
 	maxContextChunks            = 128
 	maxQueryLength              = 4096
+	maxRepositoryEntries        = 64
+	maxRepositoryContextText    = 4096
+	maxRepositoryContextStrings = 128
+	maxValidationChecks         = 64
 	maxChunkContent             = 8192
 	maxRepositoryContextText    = 4096
 	maxRepositoryContextStrings = 64
@@ -436,6 +440,11 @@ type IssueInfo struct {
 // issue analysis. It carries repository identity, issue metadata, and bounded
 // context chunks.
 type AnalyzeIssueRequest struct {
+	RepositoryID      string             `json:"repository_id"`
+	RepositoryName    string             `json:"repository_name"`
+	Language          string             `json:"language,omitempty"`
+	Issue             IssueInfo          `json:"issue"`
+	ContextChunks     []ContextChunk     `json:"context_chunks"`
 	RepositoryID   string         `json:"repository_id"`
 	RepositoryName string         `json:"repository_name"`
 	Language       string         `json:"language,omitempty"`
@@ -812,6 +821,342 @@ func validateGenerateChangesResponse(r *GenerateChangesResponse) error {
 	return nil
 }
 
+// ImpactTargetRef identifies the repository element an impact analysis starts
+// from.
+type ImpactTargetRef struct {
+	FilePath string `json:"file_path"`
+	Symbol   string `json:"symbol,omitempty"`
+}
+
+// ImpactRelationship is one deterministic relationship the API already
+// derived from the repository. It is sent to the AI service as grounding: the
+// AI may explain it or surface additional semantic relationships, but it can
+// never contradict or replace it.
+type ImpactRelationship struct {
+	FromFile string `json:"from_file"`
+	ToFile   string `json:"to_file"`
+	Kind     string `json:"kind"`
+	Evidence string `json:"evidence,omitempty"`
+}
+
+// AnalyzeImpactRequest is the controlled payload for semantic impact
+// discovery. It carries repository identity, the target, the deterministic
+// direct relationships already found, and bounded context chunks. It NEVER
+// carries tokens, secrets, or credentials.
+type AnalyzeImpactRequest struct {
+	RepositoryID      string               `json:"repository_id"`
+	RepositoryName    string               `json:"repository_name"`
+	Language          string               `json:"language,omitempty"`
+	Target            ImpactTargetRef      `json:"target"`
+	DirectImpacts     []ImpactRelationship `json:"direct_impacts"`
+	ContextChunks     []ContextChunk       `json:"context_chunks"`
+	RepositoryContext *RepositoryContext   `json:"repository_context,omitempty"`
+}
+
+// SemanticImpact is one additional POSSIBLE impact proposed by the AI service.
+// The API labels every item of this kind as inferred; it never overrides a
+// repository-derived relationship.
+type SemanticImpact struct {
+	FilePath   string  `json:"file_path"`
+	Symbol     string  `json:"symbol,omitempty"`
+	Kind       string  `json:"kind"`
+	Rationale  string  `json:"rationale"`
+	Confidence float64 `json:"confidence"`
+}
+
+// AnalyzeImpactResponse is the structured result from semantic impact
+// discovery.
+type AnalyzeImpactResponse struct {
+	Summary     string           `json:"summary"`
+	Impacts     []SemanticImpact `json:"impacts"`
+	Risks       []string         `json:"risks"`
+	Uncertainty string           `json:"uncertainty"`
+	Status      string           `json:"status"`
+}
+
+// maxSemanticImpacts bounds how many AI-proposed impacts are accepted so a
+// misbehaving service cannot flood the response.
+const maxSemanticImpacts = 128
+
+// RepositoryContext carries the compact, DETERMINISTIC repository
+// intelligence (structure summary, languages, entry points, components,
+// conventions, architecture overview, relationships) alongside an AI request.
+// It is built from the stored profile only: no secrets, no raw AI output.
+type RepositoryContext struct {
+	DeterministicSummary string   `json:"deterministic_summary"`
+	Languages            []string `json:"languages"`
+	EntryPoints          []string `json:"entry_points"`
+	Components           []string `json:"components"`
+	Conventions          []string `json:"conventions"`
+	ArchitectureOverview string   `json:"architecture_overview"`
+	Relationships        []string `json:"relationships"`
+	Uncertainty          []string `json:"uncertainty"`
+}
+
+// RepositoryStructure is the bounded, repository-derived shape forwarded for
+// architecture inference. Only counts and short labels are sent — never file
+// contents.
+type RepositoryStructure struct {
+	Languages   []string `json:"languages"`
+	Files       int      `json:"files"`
+	Chunks      int      `json:"chunks"`
+	EntryPoints []string `json:"entry_points"`
+	AppScopes   []string `json:"app_scopes"`
+	ConfigFiles []string `json:"config_files"`
+	TestFiles   []string `json:"test_files"`
+	BuildFiles  []string `json:"build_files"`
+}
+
+// AnalyzeRepositoryRequest asks the AI service to infer architecture from the
+// deterministic structure.
+type AnalyzeRepositoryRequest struct {
+	RepositoryID   string              `json:"repository_id"`
+	RepositoryName string              `json:"repository_name"`
+	Structure      RepositoryStructure `json:"structure"`
+}
+
+// AnalyzeRepositoryComponent is one inferred architectural component.
+type AnalyzeRepositoryComponent struct {
+	Name             string   `json:"name"`
+	Kind             string   `json:"kind"`
+	Path             string   `json:"path"`
+	Description      string   `json:"description"`
+	Responsibilities []string `json:"responsibilities"`
+}
+
+// AnalyzeRepositoryRelationship is one inferred component relationship.
+type AnalyzeRepositoryRelationship struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Kind string `json:"kind"`
+}
+
+// AnalyzeRepositoryConvention is one inferred convention with its evidence.
+type AnalyzeRepositoryConvention struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Evidence    []string `json:"evidence"`
+}
+
+// AnalyzeRepositoryResponse is the validated architecture interpretation.
+type AnalyzeRepositoryResponse struct {
+	Overview             string                          `json:"overview"`
+	Components           []AnalyzeRepositoryComponent    `json:"components"`
+	Relationships        []AnalyzeRepositoryRelationship `json:"relationships"`
+	Conventions          []AnalyzeRepositoryConvention   `json:"conventions"`
+	EngineeringDecisions []string                        `json:"engineering_decisions"`
+	Databases            []string                        `json:"databases"`
+	ExternalIntegrations []string                        `json:"external_integrations"`
+	Uncertainty          []string                        `json:"uncertainty"`
+	Status               string                          `json:"status"`
+}
+
+// AnalyzeRepository sends the bounded structure and returns the validated
+// architecture interpretation. The caller labels every returned item as
+// inferred: deterministic facts are never overridden by this response.
+func (c *Client) AnalyzeRepository(ctx context.Context, request *AnalyzeRepositoryRequest) (*AnalyzeRepositoryResponse, error) {
+	if err := validateRepositoryRequest(request); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRejected, err)
+	}
+
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrAPIError, err)
+	}
+
+	result, err := postAndParse[*AnalyzeRepositoryResponse](ctx, c, defaultAnalyzeRepository, body)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, ErrInvalidResponse
+	}
+
+	if err := validateRepositoryResponse(result); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+
+	return result, nil
+}
+
+func validateRepositoryRequest(r *AnalyzeRepositoryRequest) error {
+	if strings.TrimSpace(r.RepositoryID) == "" {
+		return fmt.Errorf("repository_id required")
+	}
+	if strings.TrimSpace(r.RepositoryName) == "" {
+		return fmt.Errorf("repository_name required")
+	}
+	return nil
+}
+
+func validateRepositoryResponse(r *AnalyzeRepositoryResponse) error {
+	if strings.TrimSpace(r.Overview) == "" {
+		return fmt.Errorf("overview required")
+	}
+	if strings.TrimSpace(r.Status) == "" {
+		return fmt.Errorf("status required")
+	}
+	if len(r.Components) > maxRepositoryEntries {
+		return fmt.Errorf("too many components")
+	}
+	if len(r.Relationships) > maxRepositoryEntries {
+		return fmt.Errorf("too many relationships")
+	}
+	for _, component := range r.Components {
+		if strings.TrimSpace(component.Name) == "" {
+			return fmt.Errorf("component name required")
+		}
+	}
+	for _, relationship := range r.Relationships {
+		if strings.TrimSpace(relationship.From) == "" || strings.TrimSpace(relationship.To) == "" {
+			return fmt.Errorf("relationship from and to required")
+		}
+	}
+	return nil
+}
+
+// SanitizeRepositoryContext bounds the deterministic repository context before
+// it is attached to an AI request. Exported so callers building a request in
+// another package cannot skip the bound.
+func SanitizeRepositoryContext(context *RepositoryContext) *RepositoryContext {
+	return sanitizeRepositoryContext(context)
+}
+
+// sanitizeRepositoryContext bounds the deterministic context forwarded to the
+// AI service: the summary is truncated and every list is trimmed of blank
+// entries and capped. nil in, nil out — a missing context is never faked.
+func sanitizeRepositoryContext(context *RepositoryContext) *RepositoryContext {
+	if context == nil {
+		return nil
+	}
+
+	sanitized := &RepositoryContext{
+		DeterministicSummary: context.DeterministicSummary,
+		Languages:            context.Languages,
+		EntryPoints:          context.EntryPoints,
+		Components:           context.Components,
+		Conventions:          context.Conventions,
+		ArchitectureOverview: context.ArchitectureOverview,
+		Relationships:        context.Relationships,
+		Uncertainty:          context.Uncertainty,
+	}
+
+	if len(sanitized.DeterministicSummary) > maxRepositoryContextText {
+		sanitized.DeterministicSummary = sanitized.DeterministicSummary[:maxRepositoryContextText]
+	}
+	if len(sanitized.ArchitectureOverview) > maxRepositoryContextText {
+		sanitized.ArchitectureOverview = sanitized.ArchitectureOverview[:maxRepositoryContextText]
+	}
+
+	sanitized.Languages = boundedContextStrings(sanitized.Languages)
+	sanitized.EntryPoints = boundedContextStrings(sanitized.EntryPoints)
+	sanitized.Components = boundedContextStrings(sanitized.Components)
+	sanitized.Conventions = boundedContextStrings(sanitized.Conventions)
+	sanitized.Relationships = boundedContextStrings(sanitized.Relationships)
+	sanitized.Uncertainty = boundedContextStrings(sanitized.Uncertainty)
+
+	return sanitized
+}
+
+// boundedContextStrings trims each entry, drops blanks, and caps the list.
+func boundedContextStrings(values []string) []string {
+	bounded := make([]string, 0, len(values))
+
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+
+		bounded = append(bounded, trimmed)
+
+		if len(bounded) == maxRepositoryContextStrings {
+			break
+		}
+	}
+
+	return bounded
+}
+
+// AnalyzeImpact sends a bounded semantic impact request to the AI service and
+// returns the structured, validated response. Deterministic relationships are
+// forwarded as grounding; the response is validated but its truth is decided
+// by the caller (which filters to represented files and labels it inferred).
+func (c *Client) AnalyzeImpact(ctx context.Context, request *AnalyzeImpactRequest) (*AnalyzeImpactResponse, error) {
+	if err := validateImpactRequest(request); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRejected, err)
+	}
+	sanitized := sanitizeContextChunks(request.ContextChunks)
+	body, err := json.Marshal(struct {
+		RepositoryID      string               `json:"repository_id"`
+		RepositoryName    string               `json:"repository_name"`
+		Language          string               `json:"language,omitempty"`
+		Target            ImpactTargetRef      `json:"target"`
+		DirectImpacts     []ImpactRelationship `json:"direct_impacts"`
+		ContextChunks     []ContextChunk       `json:"context_chunks"`
+		RepositoryContext *RepositoryContext   `json:"repository_context,omitempty"`
+	}{
+		RepositoryID:      request.RepositoryID,
+		RepositoryName:    request.RepositoryName,
+		Language:          request.Language,
+		Target:            request.Target,
+		DirectImpacts:     request.DirectImpacts,
+		ContextChunks:     sanitized,
+		RepositoryContext: sanitizeRepositoryContext(request.RepositoryContext),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrAPIError, err)
+	}
+	result, err := postAndParse[*AnalyzeImpactResponse](ctx, c, defaultImpactEndpoint, body)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateImpactResponse(result); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+	return result, nil
+}
+
+func validateImpactRequest(r *AnalyzeImpactRequest) error {
+	if strings.TrimSpace(r.RepositoryID) == "" {
+		return fmt.Errorf("repository_id required")
+	}
+	if strings.TrimSpace(r.RepositoryName) == "" {
+		return fmt.Errorf("repository_name required")
+	}
+	if strings.TrimSpace(r.Target.FilePath) == "" {
+		return fmt.Errorf("target.file_path required")
+	}
+	if len(r.ContextChunks) > maxContextChunks {
+		return fmt.Errorf("context_chunks exceeds %d entries", maxContextChunks)
+	}
+	return nil
+}
+
+func validateImpactResponse(r *AnalyzeImpactResponse) error {
+	if strings.TrimSpace(r.Summary) == "" {
+		return fmt.Errorf("summary required")
+	}
+	if strings.TrimSpace(r.Status) == "" {
+		return fmt.Errorf("status required")
+	}
+	if len(r.Impacts) > maxSemanticImpacts {
+		return fmt.Errorf("impacts exceeds %d entries", maxSemanticImpacts)
+	}
+	for i, item := range r.Impacts {
+		if strings.TrimSpace(item.FilePath) == "" {
+			return fmt.Errorf("impacts[%d].file_path required", i)
+		}
+		if strings.TrimSpace(item.Kind) == "" {
+			return fmt.Errorf("impacts[%d].kind required", i)
+		}
+		if item.Confidence < 0 || item.Confidence > 1 {
+			return fmt.Errorf("impacts[%d].confidence must be 0.0–1.0", i)
+		}
+	}
+	return nil
+}
+
 func postAndParse[T any](ctx context.Context, c *Client, endpoint string, body []byte) (T, error) {
 	var zero T
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+endpoint, bytes.NewReader(body))
@@ -1095,6 +1440,113 @@ type AnalyzePRFeedbackRequest struct {
 	RepositoryContext *RepositoryContext `json:"repository_context,omitempty"`
 }
 
+// ValidationFailureCheck is one FAILED controlled check forwarded for root
+// cause analysis. It carries only bounded, already-validated facts: names,
+// statuses, and the toolchain's own bounded output.
+type ValidationFailureCheck struct {
+	Name         string `json:"name"`
+	Status       string `json:"status"`
+	Stage        string `json:"stage"`
+	FailureClass string `json:"failure_class"`
+	Message      string `json:"message"`
+}
+
+// AnalyzeValidationFailureRequest is the controlled payload for validation
+// failure root cause analysis. A validation VERDICT is always deterministic:
+// this request only asks the AI to explain an already-determined failure, and
+// its answer is labeled inferred by the caller.
+type AnalyzeValidationFailureRequest struct {
+	RepositoryID   string                   `json:"repository_id"`
+	RepositoryName string                   `json:"repository_name"`
+	Language       string                   `json:"language,omitempty"`
+	Toolchains     []string                 `json:"toolchains"`
+	FailureClass   string                   `json:"failure_class"`
+	Summary        string                   `json:"summary"`
+	Checks         []ValidationFailureCheck `json:"checks"`
+}
+
+// AnalyzeValidationFailureResponse is the structured root cause explanation.
+type AnalyzeValidationFailureResponse struct {
+	Summary     string   `json:"summary"`
+	RootCause   string   `json:"root_cause"`
+	Suggestions []string `json:"suggestions"`
+	Status      string   `json:"status"`
+}
+
+// AnalyzeValidationFailure sends a bounded validation failure analysis request
+// to the AI service. It carries repository identity, toolchain labels, and the
+// failed checks only — never source code, tokens, secrets, or environment
+// variables.
+func (c *Client) AnalyzeValidationFailure(ctx context.Context, request *AnalyzeValidationFailureRequest) (*AnalyzeValidationFailureResponse, error) {
+	if err := validateValidationFailureRequest(request); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRejected, err)
+	}
+
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrAPIError, err)
+	}
+
+	result, err := postAndParse[*AnalyzeValidationFailureResponse](ctx, c, defaultAnalyzeValidation, body)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, ErrInvalidResponse
+	}
+
+	if err := validateValidationFailureResponse(result); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+
+	return result, nil
+}
+
+func validateValidationFailureRequest(r *AnalyzeValidationFailureRequest) error {
+	if strings.TrimSpace(r.RepositoryID) == "" {
+		return fmt.Errorf("repository_id required")
+	}
+	if strings.TrimSpace(r.RepositoryName) == "" {
+		return fmt.Errorf("repository_name required")
+	}
+	if len(r.Checks) > maxValidationChecks {
+		return fmt.Errorf("too many checks")
+	}
+	for _, check := range r.Checks {
+		if strings.TrimSpace(check.Name) == "" {
+			return fmt.Errorf("check name required")
+		}
+		if strings.TrimSpace(check.Status) == "" {
+			return fmt.Errorf("check status required")
+		}
+	}
+	return nil
+}
+
+func validateValidationFailureResponse(r *AnalyzeValidationFailureResponse) error {
+	if strings.TrimSpace(r.Summary) == "" {
+		return fmt.Errorf("summary required")
+	}
+	if strings.TrimSpace(r.Status) == "" {
+		return fmt.Errorf("status required")
+	}
+	return nil
+}
+
+// ActionableFeedbackItem is one grounded, actionable piece of feedback.
+// Source and OriginalText reflect GitHub's own record; Recommendation and
+// Reason are the AI's interpretation and are always presented as such.
+type ActionableFeedbackItem struct {
+	Severity       string `json:"severity"`
+	Source         string `json:"source"`
+	AuthorLogin    string `json:"author_login"`
+	FilePath       string `json:"file_path"`
+	Line           *int   `json:"line,omitempty"`
+	OriginalText   string `json:"original_text"`
+	Recommendation string `json:"recommendation"`
+	Reason         string `json:"reason"`
+}
+
 // AnalyzePRFeedbackResponse is the structured result from PR feedback analysis.
 type AnalyzePRFeedbackResponse struct {
 	Summary             string                   `json:"summary"`
@@ -1121,6 +1573,32 @@ func (c *Client) AnalyzePRFeedback(ctx context.Context, request *AnalyzePRFeedba
 	if err := validatePRFeedbackRequest(request); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrRejected, err)
 	}
+	sanitized := sanitizeContextChunks(request.ContextChunks)
+	body, err := json.Marshal(struct {
+		RepositoryID      string             `json:"repository_id"`
+		RepositoryName    string             `json:"repository_name"`
+		Language          string             `json:"language,omitempty"`
+		PullRequest       PullRequestInfo    `json:"pull_request"`
+		Checks            []PRCheckInfo      `json:"checks"`
+		Reviews           []PRReview         `json:"reviews"`
+		ReviewComments    []PRReviewComment  `json:"review_comments"`
+		IssueComments     []PRIssueComment   `json:"issue_comments"`
+		Files             []PRFileInfo       `json:"files"`
+		ContextChunks     []ContextChunk     `json:"context_chunks"`
+		RepositoryContext *RepositoryContext `json:"repository_context,omitempty"`
+	}{
+		RepositoryID:      request.RepositoryID,
+		RepositoryName:    request.RepositoryName,
+		Language:          request.Language,
+		PullRequest:       request.PullRequest,
+		Checks:            request.Checks,
+		Reviews:           request.Reviews,
+		ReviewComments:    request.ReviewComments,
+		IssueComments:     request.IssueComments,
+		Files:             request.Files,
+		ContextChunks:     sanitized,
+		RepositoryContext: sanitizeRepositoryContext(request.RepositoryContext),
+	})
 
 	body, err := json.Marshal(request)
 	if err != nil {
