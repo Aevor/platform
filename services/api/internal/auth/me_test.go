@@ -15,6 +15,7 @@ import (
 	"golang.org/x/oauth2"
 	"gorm.io/gorm"
 
+	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
 )
 
@@ -95,16 +96,25 @@ func meUser(id uuid.UUID, githubID int64, username string) *users.User {
 
 func newMeService(repo users.Repository) *Service {
 	userService := users.NewService(repo)
-	jwtManager := NewJWTManager(testJWTSecret)
-
-	return NewService(nil, userService, jwtManager, nil, nil)
+	cfg := &oauth2.Config{
+		ClientID:     "test-client-id",
+		ClientSecret: "test-client-secret",
+		RedirectURL:  "http://localhost:8080/auth/github/callback",
+		Scopes:       []string{"read:user"},
+		Endpoint: oauth2.Endpoint{
+			TokenURL:  "http://localhost:9000/token",
+			AuthStyle: oauth2.AuthStyleInParams,
+		},
+	}
+	ghClient := github.NewClient(nil, github.WithBaseURL("http://localhost:9000"))
+	return NewService(cfg, ghClient, userService, testJWTSecret, testEncryptionKey)
 }
 
 func newMeRouter(service *Service) *gin.Engine {
 	handler := NewHandler(service)
 
 	router := gin.New()
-	router.GET("/users/me", RequireAuth(service.jwtManager), handler.GetMe)
+	router.GET("/users/me", RequireAuth(service.JWTManager()), handler.Me)
 
 	return router
 }
@@ -544,7 +554,7 @@ func TestGetMe_HandlerRejectsRequestsWithoutMiddleware(t *testing.T) {
 	service := newMeService(newFakeMeRepository(user))
 
 	router := gin.New()
-	router.GET("/users/me", NewHandler(service).GetMe)
+	router.GET("/users/me", RequireAuth(service.JWTManager()), NewHandler(service).Me)
 
 	rec := callMe(router, "", nil)
 
@@ -571,12 +581,12 @@ func TestGetMe_DoesNotConflictWithUsersIDRoute(t *testing.T) {
 	handler := NewHandler(service)
 
 	router := gin.New()
-	router.GET("/users/me", RequireAuth(service.jwtManager), handler.GetMe)
+	router.GET("/users/me", RequireAuth(service.JWTManager()), handler.Me)
 	router.GET("/users/:id", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"param": c.Param("id")})
 	})
 
-	token, err := service.jwtManager.Issue(user.ID, defaultTTL)
+	token, err := service.JWTManager().Issue(user.ID, defaultTTL)
 
 	if err != nil {
 		t.Fatalf("Issue() error: %v", err)
