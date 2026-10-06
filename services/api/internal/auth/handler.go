@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -119,7 +120,7 @@ func (h *Handler) GitHubCallback(
 		GitHubError:   c.Query("error"),
 	}
 
-	authToken, user, err := h.service.HandleCallback(c.Request.Context(), params)
+	user, err := h.service.HandleCallback(c.Request.Context(), params)
 
 	if err != nil {
 		switch {
@@ -147,15 +148,17 @@ func (h *Handler) GitHubCallback(
 		return
 	}
 
-	// Success: redirect the browser to the frontend callback route carrying
-	// ONLY the Aevor JWT. The browser stores it client-side. The GitHub
-	// access token is never transmitted here — it stays encrypted server-side.
+	// Success: issue Aevor JWT and redirect to frontend callback.
+	authToken, err := h.service.JWTManager().Issue(user.ID, 24*time.Hour)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal",
+		})
+		return
+	}
+
 	dest := h.frontendURL + frontendCallbackPath + "?token=" + url.QueryEscape(authToken)
 	c.Redirect(http.StatusFound, dest)
-
-	// user is intentionally unused on the success path: the frontend fetches
-	// its own profile via GET /users/me rather than round-tripping it here.
-	_ = user
 }
 
 func (h *Handler) GetMe(
@@ -170,7 +173,7 @@ func (h *Handler) GetMe(
 		return
 	}
 
-	user, err := h.service.GetProfile(c.Request.Context(), userID)
+	user, err := h.service.Users().GetUserByID(userID)
 
 	if err != nil {
 		if errors.Is(err, users.ErrNotFound) {
