@@ -6,7 +6,9 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
+	"github.com/Aevor/platform/services/api/internal/agent"
 	"github.com/Aevor/platform/services/api/internal/ai"
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/chunking"
@@ -49,6 +51,12 @@ func main() {
 	}
 
 	log.Println("selected-repository migration completed")
+	log.Println("running agent episodes migration")
+	err = agent.MigrateEpisodes(db)
+	if err != nil {
+		log.Fatal("failed to migrate agent_episodes table: ", err)
+	}
+	log.Println("agent episodes migration completed")
 
 	userRepository := users.NewRepository(db)
 	userService := users.NewService(userRepository)
@@ -118,6 +126,36 @@ func main() {
 	)
 	repositoriesHandler := repositories.NewHandler(repositoriesService)
 
+	// Agent runtime with episodic memory
+	episodesStore := agent.NewEpisodesStore(db)
+	episodesService, err := agent.NewEpisodesService(agent.EpisodesServiceOptions{
+		Store:  episodesStore,
+		Client: aiClient,
+	})
+	if err != nil {
+		log.Fatal("failed to build episodes service: ", err)
+	}
+
+	agentHandler, err := agent.NewHandler(agent.HandlerOptions{
+		Orchestrator: agent.BuildOrchestratorWithEpisodes(
+			aiClient,
+			nil, // jobService - not wired yet
+			episodesStore,
+			uuid.Nil, // userID - will be extracted from context
+			uuid.Nil, // repoID - will be extracted from context
+			agent.OrchestratorOptions{
+				DefaultMaxIters: 10,
+			},
+		),
+		StepToJob: map[string]string{
+			"index_codebase": "repository.index",
+		},
+		Episodes: episodesService,
+	})
+	if err != nil {
+		log.Fatal("failed to build agent handler: ", err)
+	}
+
 	router := gin.New()
 	router.Use(
 		gin.LoggerWithConfig(gin.LoggerConfig{
@@ -131,6 +169,13 @@ func main() {
 			"status": "ok",
 		})
 	})
+
+	// Agent run endpoint (requires authentication)
+	router.POST(
+		"/agent/run",
+		auth.RequireAuth(jwtManager),
+		agentHandler.Run,
+	)
 
 	router.GET(
 		"/auth/github/login",
