@@ -691,3 +691,168 @@ func TestGenerateChanges_InvalidResponse(t *testing.T) {
 func isError(err error, target error) bool {
 	return err != nil && (err == target || errors.Is(err, target))
 }
+
+func TestReflect(t *testing.T) {
+	validReflectBody := `{
+		"lessons": ["Always run tests after fixing syntax", "Check imports before committing"],
+		"strategy_name": "read-fix-verify",
+		"generalization": "Fixing syntax errors in Go files after reading them",
+		"confidence": 0.8,
+		"tags": ["go", "syntax", "bug-fix"]
+	}`
+
+	t.Run("success", func(t *testing.T) {
+		server := captureServer(t, http.StatusOK, validReflectBody, func(r *http.Request, raw []byte) {
+			if r.Method != http.MethodPost {
+				t.Errorf("method = %s, want POST", r.Method)
+			}
+			if r.URL.Path != reflectEndpoint {
+				t.Errorf("path = %s, want %s", r.URL.Path, reflectEndpoint)
+			}
+			var req ReflectRequest
+			if err := json.Unmarshal(raw, &req); err != nil {
+				t.Errorf("unmarshal request: %v", err)
+			}
+			if req.Goal.Description != "Fix the login bug" {
+				t.Errorf("goal description = %q, want %q", req.Goal.Description, "Fix the login bug")
+			}
+			if req.Status != "completed" {
+				t.Errorf("status = %q, want %q", req.Status, "completed")
+			}
+			if req.Iterations != 1 {
+				t.Errorf("iterations = %d, want 1", req.Iterations)
+			}
+			if len(req.Observations) != 1 {
+				t.Errorf("observations = %d, want 1", len(req.Observations))
+			}
+			if len(req.Evaluations) != 1 {
+				t.Errorf("evaluations = %d, want 1", len(req.Evaluations))
+			}
+		})
+		defer server.Close()
+
+		client := NewClient(nil, WithBaseURL(server.URL))
+
+		req := &ReflectRequest{
+			Goal: Goal{
+				ID:           "goal-1",
+				Description:  "Fix the login bug",
+				RepositoryID: "repo-1",
+				Constraints:  []string{"must not break existing auth"},
+			},
+			Plan: PlanResponse{
+				Version:   1,
+				Rationale: "Plan",
+				Steps: []Step{
+					{
+						ID:          "s1",
+						Type:        "read_file",
+						Description: "Read auth.go",
+					},
+				},
+			},
+			Observations: []Observation{
+				{
+					StepID:     "s1",
+					Status:     "succeeded",
+					Output:     map[string]any{},
+					Error:      "",
+					Duration:   1000,
+					ObservedAt: time.Now().Format(time.RFC3339),
+				},
+			},
+			Evaluations: []Evaluation{
+				{
+					Complete:   true,
+					Reason:     "goal achieved",
+					Confidence: 0.9,
+					NextAction: "complete",
+				},
+			},
+			Status:     "completed",
+			Iterations: 1,
+			StartedAt:  time.Now().Add(-time.Minute).Format(time.RFC3339),
+			EndedAt:    time.Now().Format(time.RFC3339),
+		}
+
+		resp, err := client.Reflect(context.Background(), req)
+		if err != nil {
+			t.Fatalf("Reflect error: %v", err)
+		}
+		if resp.StrategyName != "read-fix-verify" {
+			t.Errorf("strategy_name = %q, want %q", resp.StrategyName, "read-fix-verify")
+		}
+		if resp.Confidence != 0.8 {
+			t.Errorf("confidence = %f, want 0.8", resp.Confidence)
+		}
+		if len(resp.Lessons) != 2 {
+			t.Errorf("lessons = %d, want 2", len(resp.Lessons))
+		}
+	})
+
+	t.Run("server error 503", func(t *testing.T) {
+		server := captureServer(t, http.StatusServiceUnavailable, `{}`, nil)
+		defer server.Close()
+
+		client := NewClient(nil, WithBaseURL(server.URL))
+
+		_, err := client.Reflect(context.Background(), req)
+		if !isError(err, ErrUnavailable) {
+			t.Errorf("err = %v, want ErrUnavailable", err)
+		}
+	})
+
+	t.Run("invalid response", func(t *testing.T) {
+		server := captureServer(t, http.StatusOK, `not json`, nil)
+		defer server.Close()
+
+		client := NewClient(nil, WithBaseURL(server.URL))
+
+		_, err := client.Reflect(context.Background(), req)
+		if !isError(err, ErrInvalidResponse) {
+			t.Errorf("err = %v, want ErrInvalidResponse", err)
+		}
+	})
+}
+
+var req = &ReflectRequest{
+	Goal: Goal{
+		ID:           "goal-1",
+		Description:  "Fix the login bug",
+		RepositoryID: "repo-1",
+		Constraints:  []string{"must not break existing auth"},
+	},
+	Plan: PlanResponse{
+		Version:   1,
+		Rationale: "Plan",
+		Steps: []Step{
+			{
+				ID:          "s1",
+				Type:        "read_file",
+				Description: "Read auth.go",
+			},
+		},
+	},
+	Observations: []Observation{
+		{
+			StepID:     "s1",
+			Status:     "succeeded",
+			Output:     map[string]any{},
+			Error:      "",
+			Duration:   1000,
+			ObservedAt: time.Now().Format(time.RFC3339),
+		},
+	},
+	Evaluations: []Evaluation{
+		{
+			Complete:   true,
+			Reason:     "goal achieved",
+			Confidence: 0.9,
+			NextAction: "complete",
+		},
+	},
+	Status:     "completed",
+	Iterations: 1,
+	StartedAt:  time.Now().Add(-time.Minute).Format(time.RFC3339),
+	EndedAt:    time.Now().Format(time.RFC3339),
+}
