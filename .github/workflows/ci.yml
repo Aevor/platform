@@ -30,9 +30,9 @@ jobs:
       - name: Check formatting
         working-directory: services/api
         run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            printf '%s\n' "$unformatted"
+          diff="$(gofmt -d .)"
+          if [ -n "$diff" ]; then
+            printf '%s\\n' "$diff"
             exit 1
           fi
 
