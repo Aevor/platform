@@ -32,7 +32,7 @@ jobs:
         run: |
           diff="$(gofmt -d .)"
           if [ -n "$diff" ]; then
-            printf '%s\\n' "$diff"
+            printf '%s\n' "$diff"
             exit 1
           fi
 
