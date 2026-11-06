@@ -357,11 +357,11 @@ func TestIndexedFiles_HappyPathAfterIndex(t *testing.T) {
 	dir := fixture.service.workspaces.Dir(cloneSelected)
 
 	seeded := map[string]string{
-		"main.go":       "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n",
-		"main_test.go":  "package main\n\nimport \"testing\"\n\nfunc TestMain(t *testing.T) {\n\tmain()\n}\n",
-		"README.md":     "# Demo\n\nreadme\n",
-		"go.mod":        "module demo\n",
-		".env":          "SECRET=1",
+		"main.go":      "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n",
+		"main_test.go": "package main\n\nimport \"testing\"\n\nfunc TestMain(t *testing.T) {\n\tmain()\n}\n",
+		"README.md":    "# Demo\n\nreadme\n",
+		"go.mod":       "module demo\n",
+		".env":         "SECRET=1",
 	}
 
 	for relative, content := range seeded {
