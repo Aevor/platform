@@ -318,7 +318,6 @@ func main() {
 	// router.POST(
 	// 	"/repositories/:id/index",
 
-
 	// Task 3g: metadata-only index over represented chunks. Three
 	// endpoints: rebuild, list files, and query.
 	router.POST(
