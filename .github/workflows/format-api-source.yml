@@ -1,0 +1,48 @@
+name: Format API source once
+
+on:
+  push:
+    branches:
+      - chore/platform-ci-docs-and-env
+    paths:
+      - .github/workflows/format-api-source.yml
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the review branch
+        uses: actions/checkout@v4
+        with:
+          ref: chore/platform-ci-docs-and-env
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.1'
+
+      - name: Format only the files reported by CI
+        run: |
+          gofmt -w \
+            services/api/internal/ai/client.go \
+            services/api/internal/repositories/apply.go \
+            services/api/internal/repositories/change_set_test.go \
+            services/api/internal/repositories/index_test.go
+
+      - name: Commit formatting changes and remove this one-time workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/format-api-source.yml
+          git add \
+            services/api/internal/ai/client.go \
+            services/api/internal/repositories/apply.go \
+            services/api/internal/repositories/change_set_test.go \
+            services/api/internal/repositories/index_test.go
+          if ! git diff --cached --quiet; then
+            git commit -m "style: format API Go source"
+            git push origin HEAD:chore/platform-ci-docs-and-env
+          fi
