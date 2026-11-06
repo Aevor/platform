@@ -29,13 +29,17 @@ jobs:
 
       - name: Check formatting
         working-directory: services/api
+        shell: bash
         run: |
-          diff="$(gofmt -d .)"
-          if [ -n "$diff" ]; then
-            printf '%s\n' "$diff"
+          mapfile -d '' go_files < <(find . -type f -name '*.go' -print0)
+          unformatted="$(printf '%s\0' "${go_files[@]}" | xargs -0 gofmt -l)"
+          if [[ -n "$unformatted" ]]; then
+            echo "The following Go files need gofmt:"
+            printf '%s\n' "$unformatted"
             exit 1
           fi
-
+          echo "All ${#go_files[@]} Go files are formatted."
+    
       - name: Vet
         working-directory: services/api
         run: go vet ./...
