@@ -318,15 +318,6 @@ func main() {
 	// router.POST(
 	// 	"/repositories/:id/index",
 
-	// router.POST(
-	// 	"/repositories/:id/prepare",
-	// 	auth.RequireAuth(jwtManager),
-	// 	repositoriesHandler.Prepare,
-	// )
-	// 	auth.RequireAuth(jwtManager),
-	// 	repositoriesHandler.Index,
-	// )
-
 	// Task 3g: metadata-only index over represented chunks. Three
 	// endpoints: rebuild, list files, and query.
 	router.POST(
@@ -335,11 +326,6 @@ func main() {
 		repositoriesHandler.Index,
 	)
 
-	router.POST(
-		"/repositories/:id/prepare",
-		auth.RequireAuth(jwtManager),
-		repositoriesHandler.Prepare,
-	)
 	router.GET(
 		"/repositories/:id/index/files",
 		auth.RequireAuth(jwtManager),
