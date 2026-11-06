@@ -1,0 +1,35 @@
+name: Format server entrypoint once
+
+on:
+  push:
+    branches:
+      - chore/platform-ci-docs-and-env
+    paths:
+      - .github/workflows/format-server-entrypoint.yml
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the review branch
+        uses: actions/checkout@v4
+        with:
+          ref: chore/platform-ci-docs-and-env
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.1'
+
+      - name: Format entrypoint and remove one-time workflow
+        run: |
+          gofmt -w services/api/cmd/server/main.go
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/format-server-entrypoint.yml
+          git add services/api/cmd/server/main.go
+          git commit -m "style: format API server entrypoint"
+          git push origin HEAD:chore/platform-ci-docs-and-env
