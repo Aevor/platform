@@ -17,11 +17,17 @@ import (
 // randomly generated user ID and never truncates application tables.
 func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 	dsn := os.Getenv("AEVOR_TEST_DATABASE_DSN")
-	if dsn == "" { t.Skip("set AEVOR_TEST_DATABASE_DSN to run PostgreSQL integration coverage") }
+	if dsn == "" {
+		t.Skip("set AEVOR_TEST_DATABASE_DSN to run PostgreSQL integration coverage")
+	}
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil { t.Fatalf("connect PostgreSQL: %v", err) }
-	if err := Migrate(db); err != nil { t.Fatalf("migrate jobs: %v", err) }
+	if err != nil {
+		t.Fatalf("connect PostgreSQL: %v", err)
+	}
+	if err := Migrate(db); err != nil {
+		t.Fatalf("migrate jobs: %v", err)
+	}
 
 	ctx := context.Background()
 	userID, repositoryID := uuid.New(), uuid.New()
@@ -37,7 +43,7 @@ func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 			Type: "integration.test", Payload: []byte(`{"reference":"only"}`),
 			Status: StatusQueued, MaxAttempts: 3,
 			IdempotencyKey: "integration-" + uuid.NewString(),
-			ScheduledAt: now, CreatedAt: now, UpdatedAt: now,
+			ScheduledAt:    now, CreatedAt: now, UpdatedAt: now,
 		}
 		if _, inserted, err := storeA.Insert(ctx, job); err != nil || !inserted {
 			t.Fatalf("insert job: inserted=%v err=%v", inserted, err)
@@ -47,11 +53,17 @@ func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 	// A second store instance sees the same committed rows (restart/process
 	// boundary) and duplicate idempotency keys resolve to the original row.
 	var first Job
-	if err := db.WithContext(ctx).Where("user_id = ?", userID).First(&first).Error; err != nil { t.Fatal(err) }
+	if err := db.WithContext(ctx).Where("user_id = ?", userID).First(&first).Error; err != nil {
+		t.Fatal(err)
+	}
 	reloaded, err := storeB.Get(ctx, userID, repositoryID, first.ID)
-	if err != nil || reloaded.ID != first.ID { t.Fatalf("reload after store recreation: job=%v err=%v", reloaded, err) }
+	if err != nil || reloaded.ID != first.ID {
+		t.Fatalf("reload after store recreation: job=%v err=%v", reloaded, err)
+	}
 	duplicate, inserted, err := storeB.Insert(ctx, &first)
-	if err != nil || inserted || duplicate.ID != first.ID { t.Fatalf("idempotent insert: inserted=%v job=%v err=%v", inserted, duplicate, err) }
+	if err != nil || inserted || duplicate.ID != first.ID {
+		t.Fatalf("idempotent insert: inserted=%v job=%v err=%v", inserted, duplicate, err)
+	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -61,11 +73,18 @@ func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			store := storeA
-			if i%2 == 1 { store = storeB }
+			if i%2 == 1 {
+				store = storeB
+			}
 			for {
 				job, err := store.Claim(ctx, "integration-worker-"+uuid.NewString(), time.Now().UTC(), time.Now().UTC().Add(time.Minute))
-				if err != nil { t.Errorf("claim: %v", err); return }
-				if job == nil { return }
+				if err != nil {
+					t.Errorf("claim: %v", err)
+					return
+				}
+				if job == nil {
+					return
+				}
 				mu.Lock()
 				claimed[job.ID]++
 				mu.Unlock()
@@ -73,9 +92,13 @@ func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if len(claimed) != jobCount { t.Fatalf("claimed %d/%d distinct jobs", len(claimed), jobCount) }
+	if len(claimed) != jobCount {
+		t.Fatalf("claimed %d/%d distinct jobs", len(claimed), jobCount)
+	}
 	for id, count := range claimed {
-		if count != 1 { t.Fatalf("job %s was claimed %d times", id, count) }
+		if count != 1 {
+			t.Fatalf("job %s was claimed %d times", id, count)
+		}
 	}
 
 	// An abandoned lease is recoverable through a new store/worker instance.
@@ -84,7 +107,9 @@ func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 		Type: "integration.lease", Payload: []byte(`{}`), Status: StatusQueued,
 		MaxAttempts: 3, ScheduledAt: now, CreatedAt: now, UpdatedAt: now,
 	}
-	if _, _, err := storeA.Insert(ctx, leaseJob); err != nil { t.Fatal(err) }
+	if _, _, err := storeA.Insert(ctx, leaseJob); err != nil {
+		t.Fatal(err)
+	}
 	firstClaim, err := storeA.Claim(ctx, "old-worker", now, now.Add(time.Second))
 	if err != nil || firstClaim == nil || firstClaim.ID != leaseJob.ID {
 		t.Fatalf("initial lease claim: job=%v err=%v", firstClaim, err)

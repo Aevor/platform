@@ -202,15 +202,17 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 	// intelligence-refresh fixture fails with a safe, non-retryable category.
 	registry := jobs.NewRegistry()
 	registry.MustRegister(jobs.Definition{
-		Type: JobTypeRepositoryIndex,
+		Type:        JobTypeRepositoryIndex,
 		MaxAttempts: 1,
-		Run: func(context.Context, *jobs.Job, *jobs.Executor) error { return nil },
+		Run:         func(context.Context, *jobs.Job, *jobs.Executor) error { return nil },
 	})
 	registry.MustRegister(jobs.Definition{
-		Type: JobTypeIntelligenceRefresh,
+		Type:        JobTypeIntelligenceRefresh,
 		MaxAttempts: 1,
-		Classify: func(error) jobs.ErrorCategory { return jobs.CategoryValidationError },
-		Run: func(context.Context, *jobs.Job, *jobs.Executor) error { return errors.New("fixture failure; not persisted") },
+		Classify:    func(error) jobs.ErrorCategory { return jobs.CategoryValidationError },
+		Run: func(context.Context, *jobs.Job, *jobs.Executor) error {
+			return errors.New("fixture failure; not persisted")
+		},
 	})
 	jobService, err := jobs.NewService(jobs.NewMemoryStore(), jobs.Options{
 		Registry: registry,

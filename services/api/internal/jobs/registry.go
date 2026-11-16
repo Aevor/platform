@@ -34,10 +34,14 @@ func (r *Registry) MustRegister(definition Definition) {
 }
 
 func (r *Registry) Get(typ string) (Definition, error) {
-	if r == nil { return Definition{}, ErrUnknownType }
+	if r == nil {
+		return Definition{}, ErrUnknownType
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	definition, ok := r.definitions[typ]
-	if !ok { return Definition{}, ErrUnknownType }
+	if !ok {
+		return Definition{}, ErrUnknownType
+	}
 	return definition, nil
 }

@@ -31,13 +31,27 @@ type Worker struct {
 }
 
 func NewWorker(service *Service, workerID string, options WorkerOptions) *Worker {
-	if options.PollInterval <= 0 { options.PollInterval = time.Second }
-	if options.LeaseDuration <= 0 { options.LeaseDuration = 2 * time.Minute }
-	if options.BatchSize <= 0 { options.BatchSize = 10 }
-	if options.RetryBaseDelay <= 0 { options.RetryBaseDelay = 5 * time.Second }
-	if options.RetryMaxDelay <= 0 { options.RetryMaxDelay = 5 * time.Minute }
-	if options.Retention <= 0 { options.Retention = 30 * 24 * time.Hour }
-	if workerID == "" { workerID = uuid.NewString() }
+	if options.PollInterval <= 0 {
+		options.PollInterval = time.Second
+	}
+	if options.LeaseDuration <= 0 {
+		options.LeaseDuration = 2 * time.Minute
+	}
+	if options.BatchSize <= 0 {
+		options.BatchSize = 10
+	}
+	if options.RetryBaseDelay <= 0 {
+		options.RetryBaseDelay = 5 * time.Second
+	}
+	if options.RetryMaxDelay <= 0 {
+		options.RetryMaxDelay = 5 * time.Minute
+	}
+	if options.Retention <= 0 {
+		options.Retention = 30 * 24 * time.Hour
+	}
+	if workerID == "" {
+		workerID = uuid.NewString()
+	}
 	return &Worker{service: service, workerID: workerID, options: options, done: make(chan struct{})}
 }
 
@@ -75,7 +89,9 @@ func (w *Worker) Shutdown(ctx context.Context) {
 	w.mu.Lock()
 	cancel := w.cancel
 	w.mu.Unlock()
-	if cancel != nil { cancel() }
+	if cancel != nil {
+		cancel()
+	}
 	select {
 	case <-w.done:
 	case <-ctx.Done():
@@ -83,14 +99,22 @@ func (w *Worker) Shutdown(ctx context.Context) {
 }
 
 func (w *Worker) ProcessNow(ctx context.Context, limit int) (int, error) {
-	if limit <= 0 { limit = w.options.BatchSize }
+	if limit <= 0 {
+		limit = w.options.BatchSize
+	}
 	processed := 0
 	for processed < limit {
-		if err := ctx.Err(); err != nil { return processed, err }
+		if err := ctx.Err(); err != nil {
+			return processed, err
+		}
 		now := time.Now().UTC()
 		job, err := w.service.store.Claim(ctx, w.workerID, now, now.Add(w.options.LeaseDuration))
-		if err != nil { return processed, err }
-		if job == nil { break }
+		if err != nil {
+			return processed, err
+		}
+		if job == nil {
+			break
+		}
 		processed++
 		if err := w.runJob(ctx, job); err != nil && !errors.Is(err, ErrLeaseLost) {
 			return processed, err
@@ -164,8 +188,12 @@ func (w *Worker) runJob(parent context.Context, job *Job) error {
 		job.ErrorReference = ""
 	} else {
 		category := CategoryInternalFailure
-		if definition.Classify != nil { category = definition.Classify(runErr) }
-		if category == "" { category = CategoryInternalFailure }
+		if definition.Classify != nil {
+			category = definition.Classify(runErr)
+		}
+		if category == "" {
+			category = CategoryInternalFailure
+		}
 		job.ErrorCategory = category
 		job.ErrorReference = safeErrorReference(category)
 		if category.Retryable() && job.Attempts < job.MaxAttempts {
@@ -177,7 +205,9 @@ func (w *Worker) runJob(parent context.Context, job *Job) error {
 		}
 	}
 
-	if err := w.save(job); err != nil { return err }
+	if err := w.save(job); err != nil {
+		return err
+	}
 	duration := time.Since(started).Milliseconds()
 	if job.Status == StatusSucceeded {
 		w.service.record(parent, job, "JOB_COMPLETED", "success", duration, "", "")
@@ -193,7 +223,9 @@ func (w *Worker) runJob(parent context.Context, job *Job) error {
 
 func (w *Worker) heartbeat(ctx context.Context, jobID uuid.UUID, done <-chan struct{}, lost chan<- struct{}) {
 	interval := w.options.LeaseDuration / 3
-	if interval < time.Second { interval = time.Second }
+	if interval < time.Second {
+		interval = time.Second
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -205,7 +237,10 @@ func (w *Worker) heartbeat(ctx context.Context, jobID uuid.UUID, done <-chan str
 		case <-ticker.C:
 			err := w.service.store.RenewLease(ctx, jobID, w.workerID, time.Now().UTC().Add(w.options.LeaseDuration))
 			if err != nil {
-				select { case lost <- struct{}{}: default: }
+				select {
+				case lost <- struct{}{}:
+				default:
+				}
 				return
 			}
 		}
@@ -215,20 +250,30 @@ func (w *Worker) heartbeat(ctx context.Context, jobID uuid.UUID, done <-chan str
 func (w *Worker) retryDelay(attempt int) time.Duration {
 	power := math.Pow(2, float64(max(0, attempt-1)))
 	delay := time.Duration(float64(w.options.RetryBaseDelay) * power)
-	if delay > w.options.RetryMaxDelay { return w.options.RetryMaxDelay }
+	if delay > w.options.RetryMaxDelay {
+		return w.options.RetryMaxDelay
+	}
 	return delay
 }
 
 func safeErrorReference(category ErrorCategory) string {
 	switch category {
-	case CategoryAIServiceFailure: return "ai_service_failure"
-	case CategoryTimeout: return "operation_timeout"
-	case CategoryTransientExternalError: return "external_service_failure"
-	case CategoryDatabaseFailure: return "database_operation_failed"
-	case CategoryAuthorizationError: return "authorization_failed"
-	case CategoryValidationError: return "validation_failed"
-	case CategoryUserError: return "job_input_rejected"
-	default: return "job_execution_failed"
+	case CategoryAIServiceFailure:
+		return "ai_service_failure"
+	case CategoryTimeout:
+		return "operation_timeout"
+	case CategoryTransientExternalError:
+		return "external_service_failure"
+	case CategoryDatabaseFailure:
+		return "database_operation_failed"
+	case CategoryAuthorizationError:
+		return "authorization_failed"
+	case CategoryValidationError:
+		return "validation_failed"
+	case CategoryUserError:
+		return "job_input_rejected"
+	default:
+		return "job_execution_failed"
 	}
 }
 

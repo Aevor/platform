@@ -58,29 +58,45 @@ func (s *PostgresStore) Get(ctx context.Context, userID, repositoryID, jobID uui
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, ErrNotFound
 	}
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return cloneJob(&job), nil
 }
 
 func (s *PostgresStore) List(ctx context.Context, userID, repositoryID uuid.UUID, options ListOptions) ([]Job, int, error) {
 	query := s.db.WithContext(ctx).Model(&Job{}).
 		Where("user_id = ? AND selected_repository_id = ?", userID, repositoryID)
-	if options.Status != "" { query = query.Where("status = ?", options.Status) }
-	if options.Type != "" { query = query.Where("type = ?", options.Type) }
+	if options.Status != "" {
+		query = query.Where("status = ?", options.Status)
+	}
+	if options.Type != "" {
+		query = query.Where("type = ?", options.Type)
+	}
 
 	var count int64
-	if err := query.Count(&count).Error; err != nil { return nil, 0, err }
+	if err := query.Count(&count).Error; err != nil {
+		return nil, 0, err
+	}
 
 	var jobs []Job
 	result := query.Order("created_at DESC, id ASC")
-	if options.Limit > 0 { result = result.Limit(options.Limit) }
-	if options.Offset > 0 { result = result.Offset(options.Offset) }
-	if err := result.Find(&jobs).Error; err != nil { return nil, 0, err }
+	if options.Limit > 0 {
+		result = result.Limit(options.Limit)
+	}
+	if options.Offset > 0 {
+		result = result.Offset(options.Offset)
+	}
+	if err := result.Find(&jobs).Error; err != nil {
+		return nil, 0, err
+	}
 	return jobs, int(count), nil
 }
 
 func (s *PostgresStore) Claim(ctx context.Context, workerID string, now, leaseUntil time.Time) (*Job, error) {
-	if workerID == "" { return nil, errors.New("worker id is required") }
+	if workerID == "" {
+		return nil, errors.New("worker id is required")
+	}
 	var claimed *Job
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Reclaim leases in a transaction. SKIP LOCKED lets another worker
@@ -112,7 +128,9 @@ func (s *PostgresStore) Claim(ctx context.Context, workerID string, now, leaseUn
 					job.ScheduledAt = now
 				}
 			}
-			if err := tx.Save(&job).Error; err != nil { return err }
+			if err := tx.Save(&job).Error; err != nil {
+				return err
+			}
 		}
 
 		var candidate Job
@@ -120,16 +138,24 @@ func (s *PostgresStore) Claim(ctx context.Context, workerID string, now, leaseUn
 			Where("status IN ? AND scheduled_at <= ?", []string{StatusQueued, StatusRetrying}, now).
 			Order("priority DESC, scheduled_at ASC, created_at ASC, id ASC").
 			Limit(1).Find(&candidate)
-		if result.Error != nil { return result.Error }
-		if result.RowsAffected == 0 { return nil }
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
 
 		candidate.Status = StatusRunning
 		candidate.Attempts++
 		candidate.LeaseOwner = workerID
 		candidate.LeaseExpiresAt = timePtr(leaseUntil)
-		if candidate.StartedAt == nil { candidate.StartedAt = timePtr(now) }
+		if candidate.StartedAt == nil {
+			candidate.StartedAt = timePtr(now)
+		}
 		candidate.UpdatedAt = now
-		if err := tx.Save(&candidate).Error; err != nil { return err }
+		if err := tx.Save(&candidate).Error; err != nil {
+			return err
+		}
 		claimed = cloneJob(&candidate)
 		return nil
 	})
@@ -140,8 +166,12 @@ func (s *PostgresStore) RenewLease(ctx context.Context, jobID uuid.UUID, workerI
 	result := s.db.WithContext(ctx).Model(&Job{}).
 		Where("id = ? AND lease_owner = ? AND status = ?", jobID, workerID, StatusRunning).
 		Updates(map[string]any{"lease_expires_at": leaseUntil, "updated_at": time.Now().UTC()})
-	if result.Error != nil { return result.Error }
-	if result.RowsAffected == 0 { return ErrLeaseLost }
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrLeaseLost
+	}
 	return nil
 }
 
@@ -149,23 +179,27 @@ func (s *PostgresStore) Save(ctx context.Context, job *Job, workerID string) err
 	result := s.db.WithContext(ctx).Model(&Job{}).
 		Where("id = ? AND lease_owner = ? AND status IN ?", job.ID, workerID, []string{StatusRunning, StatusCancelRequested}).
 		Updates(map[string]any{
-			"result": job.Result,
-			"status": job.Status,
-			"attempts": job.Attempts,
-			"max_attempts": job.MaxAttempts,
-			"scheduled_at": job.ScheduledAt,
-			"started_at": job.StartedAt,
-			"completed_at": job.CompletedAt,
-			"cancelled_at": job.CancelledAt,
-			"current_stage": job.CurrentStage,
-			"error_category": job.ErrorCategory,
-			"error_reference": job.ErrorReference,
-			"lease_owner": "",
+			"result":           job.Result,
+			"status":           job.Status,
+			"attempts":         job.Attempts,
+			"max_attempts":     job.MaxAttempts,
+			"scheduled_at":     job.ScheduledAt,
+			"started_at":       job.StartedAt,
+			"completed_at":     job.CompletedAt,
+			"cancelled_at":     job.CancelledAt,
+			"current_stage":    job.CurrentStage,
+			"error_category":   job.ErrorCategory,
+			"error_reference":  job.ErrorReference,
+			"lease_owner":      "",
 			"lease_expires_at": nil,
-			"updated_at": time.Now().UTC(),
+			"updated_at":       time.Now().UTC(),
 		})
-	if result.Error != nil { return result.Error }
-	if result.RowsAffected == 0 { return ErrLeaseLost }
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrLeaseLost
+	}
 	return nil
 }
 
@@ -175,8 +209,12 @@ func (s *PostgresStore) Cancel(ctx context.Context, userID, repositoryID, jobID 
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("id = ? AND user_id = ? AND selected_repository_id = ?", jobID, userID, repositoryID).
 			First(&job).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) { return ErrNotFound }
-		if err != nil { return err }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
 		switch job.Status {
 		case StatusQueued, StatusRetrying:
 			job.Status = StatusCancelled
@@ -192,7 +230,9 @@ func (s *PostgresStore) Cancel(ctx context.Context, userID, repositoryID, jobID 
 		job.UpdatedAt = now
 		return tx.Save(&job).Error
 	})
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return cloneJob(&job), nil
 }
 
@@ -202,9 +242,15 @@ func (s *PostgresStore) Retry(ctx context.Context, userID, repositoryID, jobID u
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("id = ? AND user_id = ? AND selected_repository_id = ?", jobID, userID, repositoryID).
 			First(&job).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) { return ErrNotFound }
-		if err != nil { return err }
-		if job.Status != StatusFailed { return ErrNotFailed }
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if job.Status != StatusFailed {
+			return ErrNotFailed
+		}
 		job.Status = StatusQueued
 		job.Attempts = 0
 		job.ScheduledAt = now
@@ -216,7 +262,9 @@ func (s *PostgresStore) Retry(ctx context.Context, userID, repositoryID, jobID u
 		job.UpdatedAt = now
 		return tx.Save(&job).Error
 	})
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return cloneJob(&job), nil
 }
 
