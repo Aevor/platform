@@ -104,7 +104,7 @@ func TestWorker_RetryAndSanitizeFailure(t *testing.T) {
 
 	// Advance the schedule without depending on a wall-clock sleep.
 	stored.ScheduledAt = now.Add(-time.Second)
-	if err := store.(*MemoryStore).Save(context.Background(), stored, "test-worker"); err == nil {
+	if err := store.Save(context.Background(), stored, "test-worker"); err == nil {
 		t.Fatal("unowned mutation unexpectedly succeeded")
 	}
 }
