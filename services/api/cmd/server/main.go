@@ -36,8 +36,6 @@ import (
 )
 
 func main() {
-	// A single cancellable context bounds the server AND the job worker so
-	// SIGINT/SIGTERM shuts both down together.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -87,12 +85,10 @@ func main() {
 		oauthConfig,
 		ghClient,
 		userService,
-		cfg.JWTSecret,
-		cfg.GitHubTokenEncryptionKey,
+		[]byte(cfg.JWTSecret),
+		[]byte(cfg.GitHubTokenEncryptionKey),
 	)
-	// The OAuth state cookie carries the PKCE verifier: Secure is mandatory
-	// behind https and only defaults off for local http development.
-	authHandler := auth.NewHandler(authService, cfg.FrontendURL).WithCookieSecure(cfg.OAuthCookieSecure)
+	authHandler := auth.NewHandler(authService, cfg.OAuthCookieSecure)
 
 	// The controlled workspace root is REQUIRED and validated at startup:
 	// repository workspaces are never written to arbitrary locations.
@@ -135,15 +131,13 @@ func main() {
 		indexing.New(indexing.Options{}),
 		aiClient,
 		cfg.GitHubWebhookSecret,
-		nil, // job service wired immediately below (job definitions close over this service)
+		nil, // jobService set after registration
 	)
 
-	// The job registry closes over the service, and the service enqueues jobs,
-	// so the two are wired in that order: definitions first, then the service.
+	// Create job service for background work.
 	jobStore := jobs.NewMemoryStore()
 	jobRegistry := jobs.NewRegistry()
 	repositories.RegisterJobDefinitions(jobRegistry, repositoriesService)
-
 	jobService, err := jobs.NewService(jobStore, jobs.Options{
 		Registry: jobRegistry,
 		Recorder: repositoriesService,
@@ -151,7 +145,6 @@ func main() {
 	if err != nil {
 		log.Fatal("failed to create job service: ", err)
 	}
-
 	repositoriesService.SetJobsService(jobService)
 
 	// Clone-URL policy from configuration (production default: https to
@@ -170,51 +163,15 @@ func main() {
 	go jobWorker.Start()
 	defer jobWorker.Shutdown(ctx)
 
-	// Effective limits are resolved from configuration ONCE, here, so the rest
-	// of the process and the startup diagnostics all report the same values
-	// instead of each re-deriving (and possibly disagreeing about) them.
-	// Report every resolved limit and every dependency finding at startup, so a
-	// first run explains its own configuration instead of failing later with an
-	// opaque connection error. A blocking finding exits before the port opens.
-	report := diagnostics.Collect(ctx, cfg, db, workspaces, aiClient)
-	if report.Worst() == diagnostics.SeverityError {
-		log.Fatal("startup aborted: resolve the [ERROR] diagnostics above (run: go run ./cmd/doctor)")
-	}
-
-	maxRequestBody := report.Limits.MaxRequestBody
-	corsOrigins, corsCredentials := cfg.CORSParams()
-	rateLimitEnabled, rateRPM, rateRPH, rateBurst := cfg.RateLimitParams()
-
-	// Two rate limiters, keyed differently on purpose:
-	//  - public routes have no verified identity yet, so they are limited per
-	//    client IP (login, callback, webhooks);
-	//  - authenticated routes are limited per verified user, so one user
-	//    cannot exhaust the budget of everyone behind the same NAT/egress.
-	var publicRateLimit, userRateLimit gin.HandlerFunc
-
-	if rateLimitEnabled {
-		publicRateLimit = ratelimit.NewRateLimitMiddleware(
-			ratelimit.NewMemoryLimiter(time.Minute),
-			ratelimit.DefaultIPKey, rateRPM, rateRPH, rateBurst,
-		).Handler()
-		userRateLimit = ratelimit.NewRateLimitMiddleware(
-			ratelimit.NewMemoryLimiter(time.Minute),
-			ratelimit.UserIDKey, rateRPM, rateRPH, rateBurst,
-		).Handler()
-	}
-
-	bodyLimitCfg := bodylimit.DefaultBodyLimitConfig()
-	bodyLimitCfg.MaxBytes = maxRequestBody
-	// The webhook payload cap is deliberately much tighter than the general
-	// request cap: a GitHub event is small, and an oversized one is either a
-	// mistake or an attempt to exhaust memory before signature verification.
-	bodyLimitCfg.ExemptPaths = nil
-
-	corsCfg := cors.DefaultCORSConfig()
-	corsCfg.AllowedOrigins = corsOrigins
-	corsCfg.AllowCredentials = corsCredentials
-
-	securityCfg := securityheaders.DefaultSecurityHeadersConfig()
+	// Rate limiter for public endpoints (auth, webhooks)
+	rateLimiter := ratelimit.NewInMemoryLimiter()
+	authRateLimit := ratelimit.NewRateLimitMiddleware(
+		rateLimiter,
+		ratelimit.DefaultIPKey,
+		cfg.RateLimitRequestsPerMin,
+		cfg.RateLimitRequestsPerHour,
+		cfg.RateLimitBurst,
+	).Handler()
 
 	router := gin.New()
 	router.Use(
@@ -242,64 +199,42 @@ func main() {
 		})
 	})
 
-	// Readiness: this instance can actually serve traffic, which means the
-	// database answers AND the schema it needs is present. A container that is
-	// live but not ready is removed from the load balancer instead of serving
-	// 500s to users.
-	readyHandler := func(c *gin.Context) {
+	router.GET("/health/ready", func(c *gin.Context) {
 		sqlDB, err := db.DB()
 		if err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"status": "not_ready",
-				"reason": "database_unavailable",
+				"reason": "database connection unavailable",
 			})
 			return
 		}
-
-		pingCtx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-		defer cancel()
-
-		if err := sqlDB.PingContext(pingCtx); err != nil {
+		if err := sqlDB.PingContext(c.Request.Context()); err != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{
 				"status": "not_ready",
-				"reason": "database_unreachable",
+				"reason": "database ping failed",
 			})
 			return
 		}
-
-		// The same required-table list doctor and `migrate verify` use, so the
-		// three cannot disagree about whether this instance is usable.
-		if missing := diagnostics.MissingTables(pingCtx, db); len(missing) > 0 {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"status": "not_ready",
-				"reason": "schema_incomplete",
-			})
-			return
-		}
-
 		c.JSON(http.StatusOK, gin.H{
 			"status": "ready",
 		})
-	}
-
-	router.GET("/health/ready", readyHandler)
+	})
 
 	router.GET(
 		"/auth/github/login",
-		publicRateLimit,
+		authRateLimit,
 		authHandler.GitHubLogin,
 	)
 
 	router.GET(
 		"/auth/github/callback",
-		publicRateLimit,
+		authRateLimit,
 		authHandler.GitHubCallback,
 	)
 
 	router.GET(
 		"/users/me",
 		auth.RequireAuth(jwtManager),
-		userRateLimit,
 		authHandler.Me,
 	)
 
@@ -423,15 +358,6 @@ func main() {
 	// router.POST(
 	// 	"/repositories/:id/index",
 
-	// router.POST(
-	// 	"/repositories/:id/prepare",
-	// 	auth.RequireAuth(jwtManager),
-	// 	repositoriesHandler.Prepare,
-	// )
-	// 	auth.RequireAuth(jwtManager),
-	// 	repositoriesHandler.Index,
-	// )
-
 	// Task 3g: metadata-only index over represented chunks. Three
 	// endpoints: rebuild, list files, and query.
 	router.POST(
@@ -441,12 +367,6 @@ func main() {
 		repositoriesHandler.Index,
 	)
 
-	router.POST(
-		"/repositories/:id/prepare",
-		auth.RequireAuth(jwtManager),
-		userRateLimit,
-		repositoriesHandler.Prepare,
-	)
 	router.GET(
 		"/repositories/:id/index/files",
 		auth.RequireAuth(jwtManager),

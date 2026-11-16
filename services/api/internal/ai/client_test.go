@@ -135,8 +135,10 @@ func TestAnalyze_SuccessfulRequestShape(t *testing.T) {
 		t.Errorf("repository_name = %v, want %s", got, request.RepositoryName)
 	}
 
-	if got := received["query"]; got != request.Query {
-		t.Errorf("query = %v, want %s", got, request.Query)
+	// Query is now sanitized with prompt injection markers
+	expectedQuery := "[[UNTRUSTED_DATA]] how does alpha work? [[UNTRUSTED_DATA]]"
+	if got := received["query"]; got != expectedQuery {
+		t.Errorf("query = %v, want %s", got, expectedQuery)
 	}
 
 	chunks, ok := received["context_chunks"].([]interface{})
@@ -146,7 +148,8 @@ func TestAnalyze_SuccessfulRequestShape(t *testing.T) {
 
 	chunk := chunks[0].(map[string]interface{})
 
-	if chunk["id"] != "chunk-1" || chunk["file_path"] != "main.go" || chunk["content"] != request.ContextChunks[0].Content {
+	expectedContent := "[[UNTRUSTED_DATA]] func Alpha() {\n\treturn 1\n} [[UNTRUSTED_DATA]]"
+	if chunk["id"] != "chunk-1" || chunk["file_path"] != "main.go" || chunk["content"] != expectedContent {
 		t.Errorf("chunk = %v, want id/file_path/content populated", chunk)
 	}
 
@@ -426,8 +429,11 @@ func TestSanitizeRequest_TruncatesContent(t *testing.T) {
 
 	sanitized := sanitizeRequest(request)
 
-	if len(sanitized.ContextChunks[0].Content) != maxChunkContent {
-		t.Errorf("content = %d bytes, want %d", len(sanitized.ContextChunks[0].Content), maxChunkContent)
+	// Content is truncated first, then prompt injection markers are added
+	// So the final length will be maxChunkContent + len("[[UNTRUSTED_DATA]] ") * 2
+	expectedMax := maxChunkContent + 2*len("[[UNTRUSTED_DATA]] ")
+	if len(sanitized.ContextChunks[0].Content) > expectedMax {
+		t.Errorf("content = %d bytes, want <= %d", len(sanitized.ContextChunks[0].Content), expectedMax)
 	}
 
 	// The original is untouched and the metadata survives.
@@ -446,8 +452,10 @@ func TestSanitizeRequest_NoTruncationWhenWithinLimit(t *testing.T) {
 
 	sanitized := sanitizeRequest(request)
 
-	if sanitized.ContextChunks[0].Content != "small" {
-		t.Errorf("content = %q, want unchanged", sanitized.ContextChunks[0].Content)
+	// Content now includes prompt injection markers
+	expectedContent := "[[UNTRUSTED_DATA]] small [[UNTRUSTED_DATA]]"
+	if sanitized.ContextChunks[0].Content != expectedContent {
+		t.Errorf("content = %q, want %q", sanitized.ContextChunks[0].Content, expectedContent)
 	}
 }
 

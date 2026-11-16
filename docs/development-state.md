@@ -1,11 +1,7 @@
-# Aevor — Development State
+# Aevor — Implementation History
 
-Current state of the platform repository.
-NOTE: the canonical project docs live in the `docs` repo at `docs/development-state.md`. Keep this mirror in sync or delete it; do not let the two diverge.
+This file is a dated engineering log. It records implementation details and verification results as they were written; it is not a live status dashboard, and the historical branch names below do not describe the current default branch. Check the current source and route registration in `services/api/cmd/server/main.go` for the API surface today.
 
-## Branch / baseline
-
-- Working branch: `feature/task3f-code-representation` (stacked on `feature/task3e-codebase-chunking`).
 
 ## Codebase indexing (Task 3g, 2026-08-25)
 

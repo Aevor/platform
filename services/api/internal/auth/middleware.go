@@ -8,21 +8,32 @@ import (
 	"github.com/google/uuid"
 )
 
-const bearerPrefix = "Bearer "
-
 func RequireAuth(manager *JWTManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		token, ok := bearerToken(c.GetHeader("Authorization"))
+		header := c.GetHeader("Authorization")
 
-		if !ok {
-			abortUnauthorized(c)
+		if !strings.HasPrefix(header, "Bearer ") {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": "unauthorized",
+			})
+			return
+		}
+
+		token := strings.TrimPrefix(header, "Bearer ")
+
+		if token == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": "unauthorized",
+			})
 			return
 		}
 
 		userID, err := manager.Verify(token)
 
 		if err != nil {
-			abortUnauthorized(c)
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": "unauthorized",
+			})
 			return
 		}
 
@@ -46,24 +57,4 @@ func GetAuthenticatedUserID(c *gin.Context) (uuid.UUID, bool) {
 	}
 
 	return userID, true
-}
-
-func bearerToken(header string) (string, bool) {
-	if !strings.HasPrefix(header, bearerPrefix) {
-		return "", false
-	}
-
-	token := strings.TrimPrefix(header, bearerPrefix)
-
-	if token == "" {
-		return "", false
-	}
-
-	return token, true
-}
-
-func abortUnauthorized(c *gin.Context) {
-	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-		"error": "unauthorized",
-	})
 }

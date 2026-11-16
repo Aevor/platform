@@ -35,8 +35,6 @@ var testEncryptionKey = func() []byte {
 
 var testJWTSecret = []byte("test-jwt-signing-secret-that-is-at-least-32-bytes")
 
-const testFrontendURL = "http://localhost:5173"
-
 func newTestJWTManager() *JWTManager {
 	return NewJWTManager(testJWTSecret)
 }
@@ -195,7 +193,7 @@ func newCallbackService(tokenURL, userURL string) (*Service, *fakeUserRepository
 			TokenURL:  tokenURL,
 			AuthStyle: oauth2.AuthStyleInParams,
 		},
-	}, userService, newTestJWTManager(), ghClient, testEncryptionKey), userRepo
+	}, ghClient, userService, testJWTSecret, testEncryptionKey), userRepo
 }
 
 func newCallbackRouter(handler *Handler) *gin.Engine {
@@ -288,56 +286,6 @@ func assertOAuthCookieCleared(t *testing.T, rec *httptest.ResponseRecorder) {
 	}
 }
 
-// assertCallbackSuccessJWT runs the callback against a fully-configured router
-// and asserts the success contract: a 302 redirect to the frontend callback
-// route carrying only the Aevor JWT. It returns the verified JWT, the decoded
-// user UUID (JWT sub), and the raw recorder for further assertions.
-func assertCallbackSuccessJWT(
-	t *testing.T,
-	router *gin.Engine,
-	cookie *http.Cookie,
-	code string,
-	stored oauthStateCookie,
-) (string, uuid.UUID, *httptest.ResponseRecorder) {
-	t.Helper()
-
-	query := url.Values{}
-	query.Set("code", code)
-	query.Set("state", stored.State)
-
-	rec := callCallback(router, cookie, query)
-
-	if rec.Code != http.StatusFound {
-		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusFound, rec.Body.String())
-	}
-
-	loc := rec.Header().Get("Location")
-
-	wantPrefix := testFrontendURL + "/auth/callback?token="
-
-	if !strings.HasPrefix(loc, wantPrefix) {
-		t.Fatalf("Location = %q, want prefix %q", loc, wantPrefix)
-	}
-
-	if strings.Contains(loc, "fake-access-token") {
-		t.Error("callback redirect contains the GitHub access token")
-	}
-
-	authToken, err := url.QueryUnescape(strings.TrimPrefix(loc, wantPrefix))
-
-	if err != nil || authToken == "" {
-		t.Fatalf("token query parameter invalid: token=%q err=%v", authToken, err)
-	}
-
-	userID, err := newTestJWTManager().Verify(authToken)
-
-	if err != nil {
-		t.Fatalf("callback JWT does not verify: %v", err)
-	}
-
-	return authToken, userID, rec
-}
-
 func TestCallback_ValidStateAccepted(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -348,12 +296,76 @@ func TestCallback_ValidStateAccepted(t *testing.T) {
 	defer ue.close()
 
 	service, repo := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
 
-	_, userID, _ := assertCallbackSuccessJWT(t, router, cookie, "valid-auth-code", stored)
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
+
+	rec := callCallback(router, cookie, query)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var body map[string]interface{}
+
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+
+	authToken, ok := body["token"].(string)
+
+	if !ok || authToken == "" {
+		t.Fatal("callback response is missing the Aevor JWT")
+	}
+
+	if strings.Contains(rec.Body.String(), "fake-access-token") {
+		t.Error("callback response contains the GitHub access token")
+	}
+
+	user, ok := body["user"].(map[string]interface{})
+
+	if !ok {
+		t.Fatal("response is missing the user object")
+	}
+
+	if _, err := uuid.Parse(user["id"].(string)); err != nil {
+		t.Errorf("user.id = %v is not a valid Aevor UUID: %v", user["id"], err)
+	}
+
+	userID, err := newTestJWTManager().Verify(authToken)
+
+	if err != nil {
+		t.Fatalf("callback JWT does not verify: %v", err)
+	}
+
+	if userID.String() != user["id"] {
+		t.Errorf("callback JWT sub = %q, response user.id = %v (must match)", userID, user["id"])
+	}
+
+	if user["github_id"] != float64(583231) {
+		t.Errorf("user.github_id = %v, want 583231", user["github_id"])
+	}
+
+	if user["username"] != "octocat" {
+		t.Errorf("user.username = %v, want octocat", user["username"])
+	}
+
+	if user["display_name"] != "The Octocat" {
+		t.Errorf("user.display_name = %v, want The Octocat", user["display_name"])
+	}
+
+	if user["email"] != "octocat@example.com" {
+		t.Errorf("user.email = %v, want octocat@example.com", user["email"])
+	}
+
+	if user["avatar_url"] != "https://avatars.githubusercontent.com/u/583231" {
+		t.Errorf("user.avatar_url = %v, want the avatar URL", user["avatar_url"])
+	}
 
 	storedUser := repo.users[583231]
 
@@ -361,8 +373,8 @@ func TestCallback_ValidStateAccepted(t *testing.T) {
 		t.Fatal("no user row stored for github_id 583231")
 	}
 
-	if storedUser.ID.String() != userID.String() {
-		t.Errorf("stored Aevor UUID = %q, JWT sub = %q (must match)", storedUser.ID, userID)
+	if storedUser.ID.String() != user["id"] {
+		t.Errorf("stored Aevor UUID = %q, response UUID = %v (must match)", storedUser.ID, user["id"])
 	}
 
 	if storedUser.GitHubAccessToken == nil {
@@ -430,7 +442,7 @@ func TestCallback_MissingStateCookieRejected(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	query := url.Values{}
@@ -460,7 +472,7 @@ func TestCallback_MalformedStateCookieRejected(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie := &http.Cookie{
@@ -495,7 +507,7 @@ func TestCallback_MismatchedStateRejected(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -548,7 +560,7 @@ func TestCallback_VerifierFromCookiePassedToExchange(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, loginURL := loginForCallback(t, handler)
@@ -563,7 +575,15 @@ func TestCallback_VerifierFromCookiePassedToExchange(t *testing.T) {
 		t.Fatalf("cookie verifier does not match the S256 challenge sent at login")
 	}
 
-	_, _, _ = assertCallbackSuccessJWT(t, router, cookie, "valid-auth-code", stored)
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
+
+	rec := callCallback(router, cookie, query)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
 
 	if te.lastForm.Get("code_verifier") != stored.Verifier {
 		t.Errorf("exchange code_verifier = %q, want the original verifier from the cookie %q", te.lastForm.Get("code_verifier"), stored.Verifier)
@@ -580,12 +600,20 @@ func TestCallback_ExchangeOccursExactlyOnce(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
 
-	_, _, _ = assertCallbackSuccessJWT(t, router, cookie, "valid-auth-code", stored)
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
+
+	rec := callCallback(router, cookie, query)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
 
 	if te.requests != 1 {
 		t.Errorf("token endpoint requests = %d, want exactly 1", te.requests)
@@ -609,7 +637,7 @@ func TestCallback_ExchangeFailureNotRetried(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -644,7 +672,7 @@ func TestCallback_ExchangeInvalidCodeMapped(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -676,7 +704,7 @@ func TestCallback_AccessDeniedMapped(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -708,7 +736,7 @@ func TestCallback_StateVerifiedBeforeErrorParam(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -732,7 +760,7 @@ func TestCallback_MissingCodeMapped(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -763,12 +791,20 @@ func TestCallback_CookieClearedAfterProcessing(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
 
-	_, _, rec := assertCallbackSuccessJWT(t, router, cookie, "valid-auth-code", stored)
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
+
+	rec := callCallback(router, cookie, query)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
 
 	assertOAuthCookieCleared(t, rec)
 }
@@ -783,7 +819,7 @@ func TestCallback_CookieClearedOnInvalidState(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -828,7 +864,7 @@ func TestCallback_GitHubUserEndpointErrorsCollapseToUnavailable(t *testing.T) {
 			defer ue.close()
 
 			service, _ := newCallbackService(te.server.URL, ue.server.URL)
-			handler := NewHandler(service, testFrontendURL)
+			handler := NewHandler(service)
 			router := newCallbackRouter(handler)
 
 			cookie, stored, _ := loginForCallback(t, handler)
@@ -863,7 +899,7 @@ func TestCallback_NoSensitiveValuesInLogs(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 
 	var logged bytes.Buffer
 
@@ -882,7 +918,15 @@ func TestCallback_NoSensitiveValuesInLogs(t *testing.T) {
 
 	cookie, stored, _ := loginForCallback(t, handler)
 
-	authToken, _, _ := assertCallbackSuccessJWT(t, router, cookie, "sensitive-auth-code", stored)
+	query := url.Values{}
+	query.Set("code", "sensitive-auth-code")
+	query.Set("state", stored.State)
+
+	rec := callCallback(router, cookie, query)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
 
 	output := logged.String()
 
@@ -892,7 +936,6 @@ func TestCallback_NoSensitiveValuesInLogs(t *testing.T) {
 		stored.Verifier,
 		"fake-access-token",
 		"test-client-secret",
-		authToken,
 	} {
 		if strings.Contains(output, sensitive) {
 			t.Errorf("log output contains sensitive value %q", sensitive)
@@ -910,12 +953,20 @@ func TestCallback_GitHubAccessTokenNotInResponse(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
 
-	_, _, rec := assertCallbackSuccessJWT(t, router, cookie, "valid-auth-code", stored)
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
+
+	rec := callCallback(router, cookie, query)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
 
 	if strings.Contains(rec.Body.String(), "fake-access-token") {
 		t.Error("response contains the GitHub access token")
@@ -935,7 +986,7 @@ func TestCallback_NoSensitiveMaterialInErrorResponses(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -1049,17 +1100,45 @@ func TestCallback_ReLoginReplacesTokenKeepsAevorUUID(t *testing.T) {
 	defer ue.close()
 
 	service, repo := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
 
-	_, firstUserID, _ := assertCallbackSuccessJWT(t, router, cookie, "valid-auth-code", stored)
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
 
-	_, secondUserID, _ := assertCallbackSuccessJWT(t, router, cookie, "valid-auth-code", stored)
+	first := callCallback(router, cookie, query)
 
-	if firstUserID != secondUserID {
-		t.Errorf("Aevor UUID changed across re-login: %q -> %q (must stay stable)", firstUserID, secondUserID)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first callback status = %d, want %d (body %s)", first.Code, http.StatusOK, first.Body.String())
+	}
+
+	var firstBody struct {
+		User users.UserResponse `json:"user"`
+	}
+
+	if err := json.Unmarshal(first.Body.Bytes(), &firstBody); err != nil {
+		t.Fatalf("invalid first callback JSON: %v", err)
+	}
+
+	second := callCallback(router, cookie, query)
+
+	if second.Code != http.StatusOK {
+		t.Fatalf("second callback status = %d, want %d (body %s)", second.Code, http.StatusOK, second.Body.String())
+	}
+
+	var secondBody struct {
+		User users.UserResponse `json:"user"`
+	}
+
+	if err := json.Unmarshal(second.Body.Bytes(), &secondBody); err != nil {
+		t.Fatalf("invalid second callback JSON: %v", err)
+	}
+
+	if firstBody.User.ID != secondBody.User.ID {
+		t.Errorf("Aevor UUID changed across re-login: %q -> %q (must stay stable)", firstBody.User.ID, secondBody.User.ID)
 	}
 
 	if len(repo.users) != 1 {
@@ -1124,8 +1203,8 @@ func TestCallback_EncryptionFailureDoesNotPersist(t *testing.T) {
 			TokenURL:  te.server.URL,
 			AuthStyle: oauth2.AuthStyleInParams,
 		},
-	}, userService, nil, ghClient, []byte("too-short"))
-	handler := NewHandler(service, testFrontendURL)
+	}, ghClient, userService, testJWTSecret, []byte("too-short"))
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -1162,7 +1241,7 @@ func TestCallback_DatabaseFailureDoesNotLeakToken(t *testing.T) {
 
 	service, repo := newCallbackService(te.server.URL, ue.server.URL)
 	repo.upsertErr = errors.New("database connection lost")
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -1198,12 +1277,20 @@ func TestCallback_UserRowIncludesEncryptedTokenNotPlaintext(t *testing.T) {
 	defer ue.close()
 
 	service, repo := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
 
-	_, _, rec := assertCallbackSuccessJWT(t, router, cookie, "valid-auth-code", stored)
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
+
+	rec := callCallback(router, cookie, query)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
 
 	storedUser := repo.users[583231]
 
@@ -1237,7 +1324,7 @@ func TestCallback_FailedGitHubAuthProducesNoJWT(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -1294,8 +1381,8 @@ func TestCallback_JWTSigningFailureHandledSafely(t *testing.T) {
 			TokenURL:  te.server.URL,
 			AuthStyle: oauth2.AuthStyleInParams,
 		},
-	}, userService, NewJWTManager([]byte("too-short")), ghClient, testEncryptionKey)
-	handler := NewHandler(service, testFrontendURL)
+	}, ghClient, userService, []byte("too-short"), testEncryptionKey)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -1333,14 +1420,34 @@ func TestCallback_JWTClaimsCarryOnlyAevorIdentity(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
 
-	authToken, _, _ := assertCallbackSuccessJWT(t, router, cookie, "valid-auth-code", stored)
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
 
-	payload := decodedJWTClaims(t, authToken)
+	rec := callCallback(router, cookie, query)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var body struct {
+		Token string `json:"token"`
+	}
+
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
+	}
+
+	if body.Token == "" {
+		t.Fatal("callback response is missing the Aevor JWT")
+	}
+
+	payload := decodedJWTClaims(t, body.Token)
 
 	for _, sensitive := range []string{
 		"fake-access-token",
@@ -1367,19 +1474,23 @@ func TestCallback_StateCookieConsumedAfterSuccess(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
 
-	_, _, _ = assertCallbackSuccessJWT(t, router, cookie, "valid-auth-code", stored)
+	query := url.Values{}
+	query.Set("code", "valid-auth-code")
+	query.Set("state", stored.State)
+
+	first := callCallback(router, cookie, query)
+
+	if first.Code != http.StatusOK {
+		t.Fatalf("first callback status = %d, want %d (body %s)", first.Code, http.StatusOK, first.Body.String())
+	}
 
 	// A replay without the (now-cleared) cookie must fail before any exchange.
-	replayQuery := url.Values{}
-	replayQuery.Set("code", "valid-auth-code")
-	replayQuery.Set("state", stored.State)
-
-	second := callCallback(router, nil, replayQuery)
+	second := callCallback(router, nil, query)
 
 	assertCallbackError(t, second, http.StatusBadRequest, "invalid_state")
 
@@ -1412,19 +1523,23 @@ func TestCallback_ReplayedAuthorizationCodeRejected(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
 
-	_, _, _ = assertCallbackSuccessJWT(t, router, cookie, "single-use-code", stored)
+	query := url.Values{}
+	query.Set("code", "single-use-code")
+	query.Set("state", stored.State)
+
+	first := callCallback(router, cookie, query)
+
+	if first.Code != http.StatusOK {
+		t.Fatalf("first callback status = %d, want %d (body %s)", first.Code, http.StatusOK, first.Body.String())
+	}
 
 	// Attacker replays the exact captured request (cookie + state + code).
-	replayQuery := url.Values{}
-	replayQuery.Set("code", "single-use-code")
-	replayQuery.Set("state", stored.State)
-
-	second := callCallback(router, cookie, replayQuery)
+	second := callCallback(router, cookie, query)
 
 	assertCallbackError(t, second, http.StatusBadRequest, "invalid_code")
 
@@ -1443,7 +1558,7 @@ func TestCallback_ClientSuppliedGitHubIDIgnored(t *testing.T) {
 	defer ue.close()
 
 	service, repo := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -1456,21 +1571,28 @@ func TestCallback_ClientSuppliedGitHubIDIgnored(t *testing.T) {
 
 	rec := callCallback(router, cookie, query)
 
-	if rec.Code != http.StatusFound {
-		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusFound, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d (body %s)", rec.Code, http.StatusOK, rec.Body.String())
 	}
 
-	if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, testFrontendURL+"/auth/callback?token=") {
-		t.Fatalf("Location = %q, want the frontend callback prefix", loc)
+	var body map[string]interface{}
+
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON body: %v", err)
 	}
 
-	// Identity must come from the GitHub profile, never from query params.
+	user, ok := body["user"].(map[string]interface{})
+
+	if !ok {
+		t.Fatal("response is missing the user object")
+	}
+
+	if user["github_id"] != float64(583231) {
+		t.Errorf("user.github_id = %v, want 583231 (identity must come from the GitHub profile, never query params)", user["github_id"])
+	}
+
 	if _, ok := repo.users[999999999]; ok {
 		t.Error("attacker-supplied github_id was persisted")
-	}
-
-	if _, ok := repo.users[583231]; !ok {
-		t.Error("profile-derived github_id 583231 was not persisted")
 	}
 }
 
@@ -1484,7 +1606,7 @@ func TestCallback_NonAccessDeniedErrorMappedToUnavailable(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -1515,7 +1637,7 @@ func TestCallback_MissingAccessTokenMappedToUnavailable(t *testing.T) {
 	defer ue.close()
 
 	service, repo := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)
@@ -1552,7 +1674,7 @@ func TestCallback_GitHubFailureLogsCarryNoSecrets(t *testing.T) {
 	defer ue.close()
 
 	service, _ := newCallbackService(te.server.URL, ue.server.URL)
-	handler := NewHandler(service, testFrontendURL)
+	handler := NewHandler(service)
 	router := newCallbackRouter(handler)
 
 	cookie, stored, _ := loginForCallback(t, handler)

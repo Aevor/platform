@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/users"
 )
 
@@ -15,12 +16,7 @@ const (
 	oauthCookieName   = "aevor_oauth_state"
 	oauthCookiePath   = "/auth"
 	oauthCookieMaxAge = 600
-	oauthCookieSecure = false
 )
-
-// frontendCallbackPath is the frontend route that receives the Aevor JWT
-// after a successful OAuth callback (as ?token=<jwt>).
-const frontendCallbackPath = "/auth/callback"
 
 type oauthStateCookie struct {
 	State    string `json:"state"`
@@ -28,18 +24,36 @@ type oauthStateCookie struct {
 }
 
 type Handler struct {
-	service     *Service
-	frontendURL string
+	service      *Service
+	frontendURL  string
+	cookieSecure bool
 }
 
-func NewHandler(
-	service *Service,
-	frontendURL string,
-) *Handler {
+// NewHandler wires the OAuth HTTP surface.
+//
+// frontendURL identifies the browser application that completes the login
+// (it is recorded for diagnostics and CORS configuration, never trusted for
+// identity). cookieSecure is OPTIONAL and defaults to false for local HTTP
+// development; pass true for any https deployment so the PKCE state cookie is
+// never sent over plaintext.
+func NewHandler(service *Service, frontendURL ...string) *Handler {
+	frontend := ""
+	if len(frontendURL) > 0 {
+		frontend = frontendURL[0]
+	}
+
 	return &Handler{
 		service:     service,
-		frontendURL: frontendURL,
+		frontendURL: frontend,
 	}
+}
+
+// WithCookieSecure sets the Secure attribute on the OAuth state cookie. It
+// MUST be enabled for any https deployment: the cookie carries the PKCE
+// verifier and CSRF state, which must never travel over plaintext.
+func (h *Handler) WithCookieSecure(secure bool) *Handler {
+	h.cookieSecure = secure
+	return h
 }
 
 func (h *Handler) GitHubLogin(
@@ -74,7 +88,7 @@ func (h *Handler) GitHubLogin(
 		oauthCookieMaxAge,
 		oauthCookiePath,
 		"",
-		oauthCookieSecure,
+		h.cookieSecure,
 		true,
 	)
 
@@ -119,7 +133,7 @@ func (h *Handler) GitHubCallback(
 		GitHubError:   c.Query("error"),
 	}
 
-	authToken, user, err := h.service.HandleCallback(c.Request.Context(), params)
+	user, err := h.service.HandleCallback(c.Request.Context(), params)
 
 	if err != nil {
 		switch {
@@ -135,7 +149,23 @@ func (h *Handler) GitHubCallback(
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "invalid_code",
 			})
-		case errors.Is(err, ErrGitHubUnavailable):
+		case errors.Is(err, github.ErrUnauthorized):
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "github_api_unauthorized",
+			})
+		case errors.Is(err, github.ErrRateLimited):
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error": "github_rate_limited",
+			})
+		case errors.Is(err, github.ErrInvalidResponse):
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "github_invalid_response",
+			})
+		case errors.Is(err, github.ErrAPIError):
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "github_api_error",
+			})
+		case errors.Is(err, ErrGitHubUnavailable) || errors.Is(err, github.ErrUnavailable):
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": "github_unavailable",
 			})
@@ -147,46 +177,24 @@ func (h *Handler) GitHubCallback(
 		return
 	}
 
-	// Success: redirect the browser to the frontend callback route carrying
-	// ONLY the Aevor JWT. The browser stores it client-side. The GitHub
-	// access token is never transmitted here — it stays encrypted server-side.
-	dest := h.frontendURL + frontendCallbackPath + "?token=" + url.QueryEscape(authToken)
-	c.Redirect(http.StatusFound, dest)
-
-	// user is intentionally unused on the success path: the frontend fetches
-	// its own profile via GET /users/me rather than round-tripping it here.
-	_ = user
-}
-
-func (h *Handler) GetMe(
-	c *gin.Context,
-) {
-	userID, ok := GetAuthenticatedUserID(c)
-
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "unauthorized",
-		})
-		return
-	}
-
-	user, err := h.service.GetProfile(c.Request.Context(), userID)
+	// The Aevor session token is minted here, after GitHub authentication has
+	// fully succeeded. It is the ONLY credential handed to the browser: the
+	// GitHub access token never leaves the backend.
+	token, err := h.service.jwtManager.Issue(user.ID, defaultTTL)
 
 	if err != nil {
-		if errors.Is(err, users.ErrNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": "user_not_found",
-			})
-			return
-		}
-
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "internal",
 		})
 		return
 	}
 
-	c.JSON(http.StatusOK, users.ToUserResponse(user))
+	// Hand the session token to the browser application. The redirect target is
+	// the CONFIGURED frontend, never a request-supplied URL, so this cannot be
+	// turned into an open redirect that leaks the token to an attacker's site.
+	location := h.frontendURL + "/auth/callback?token=" + url.QueryEscape(token)
+
+	c.Redirect(http.StatusFound, location)
 }
 
 func (h *Handler) clearOAuthStateCookie(c *gin.Context) {
@@ -196,7 +204,27 @@ func (h *Handler) clearOAuthStateCookie(c *gin.Context) {
 		-1,
 		oauthCookiePath,
 		"",
-		oauthCookieSecure,
+		h.cookieSecure,
 		true,
 	)
+}
+
+func (h *Handler) Me(c *gin.Context) {
+	userID, ok := GetAuthenticatedUserID(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	user, err := h.service.users.GetUserByID(userID)
+	if err != nil {
+		if errors.Is(err, users.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user_not_found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal"})
+		return
+	}
+
+	c.JSON(http.StatusOK, users.ToUserResponse(user))
 }
