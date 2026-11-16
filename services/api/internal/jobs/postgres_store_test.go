@@ -77,4 +77,20 @@ func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 	for id, count := range claimed {
 		if count != 1 { t.Fatalf("job %s was claimed %d times", id, count) }
 	}
+
+	// An abandoned lease is recoverable through a new store/worker instance.
+	leaseJob := &Job{
+		ID: uuid.New(), UserID: userID, SelectedRepositoryID: repositoryID,
+		Type: "integration.lease", Payload: []byte(`{}`), Status: StatusQueued,
+		MaxAttempts: 3, ScheduledAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	if _, _, err := storeA.Insert(ctx, leaseJob); err != nil { t.Fatal(err) }
+	firstClaim, err := storeA.Claim(ctx, "old-worker", now, now.Add(time.Second))
+	if err != nil || firstClaim == nil || firstClaim.ID != leaseJob.ID {
+		t.Fatalf("initial lease claim: job=%v err=%v", firstClaim, err)
+	}
+	reclaimed, err := storeB.Claim(ctx, "new-worker", now.Add(2*time.Second), now.Add(3*time.Second))
+	if err != nil || reclaimed == nil || reclaimed.ID != leaseJob.ID || reclaimed.Attempts != 2 {
+		t.Fatalf("expired lease was not recovered: job=%v err=%v", reclaimed, err)
+	}
 }
