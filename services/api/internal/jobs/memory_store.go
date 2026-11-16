@@ -170,7 +170,7 @@ func (s *MemoryStore) RenewLease(ctx context.Context, jobID uuid.UUID, workerID 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	job, ok := s.jobs[jobID]
-	if !ok || job.LeaseOwner != workerID || job.Status != StatusRunning {
+	if !ok || job.LeaseOwner != workerID || (job.Status != StatusRunning && job.Status != StatusCancelRequested) {
 		return ErrLeaseLost
 	}
 	job.LeaseExpiresAt = timePtr(leaseUntil)
