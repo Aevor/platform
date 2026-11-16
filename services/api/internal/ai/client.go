@@ -440,11 +440,11 @@ type IssueInfo struct {
 // issue analysis. It carries repository identity, issue metadata, and bounded
 // context chunks.
 type AnalyzeIssueRequest struct {
-	RepositoryID      string             `json:"repository_id"`
-	RepositoryName    string             `json:"repository_name"`
-	Language          string             `json:"language,omitempty"`
-	Issue             IssueInfo          `json:"issue"`
-	ContextChunks     []ContextChunk     `json:"context_chunks"`
+	RepositoryID   string         `json:"repository_id"`
+	RepositoryName string         `json:"repository_name"`
+	Language       string         `json:"language,omitempty"`
+	Issue          IssueInfo      `json:"issue"`
+	ContextChunks  []ContextChunk `json:"context_chunks"`
 	RepositoryID   string         `json:"repository_id"`
 	RepositoryName string         `json:"repository_name"`
 	Language       string         `json:"language,omitempty"`

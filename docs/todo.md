@@ -1,7 +1,6 @@
-# Aevor Development TODO
+# Aevor implementation notes
 
-Tracking the progression of Aevor Task 1 (GitHub OAuth login + user registration).
-Canonical project docs live in the `docs` repo (`docs/development-state.md`); this file mirrors the tracker for the platform repo.
+Historical tracker for the early OAuth and repository-processing milestones. Completed items below describe what was implemented and tested at the time; this is not a current list of remaining tasks. Check the source and open issues before treating an item as outstanding.
 
 ## Completed
 
