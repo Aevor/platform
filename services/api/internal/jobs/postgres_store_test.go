@@ -13,11 +13,11 @@ import (
 )
 
 // This test is intentionally opt-in and requires a disposable PostgreSQL
-// database. Set AEVOR_TEST_DATABASE_URL; the test scopes cleanup to its own
+// database. Set AEVOR_TEST_DATABASE_DSN; the test scopes cleanup to its own
 // randomly generated user ID and never truncates application tables.
 func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
-	dsn := os.Getenv("AEVOR_TEST_DATABASE_URL")
-	if dsn == "" { t.Skip("set AEVOR_TEST_DATABASE_URL to run PostgreSQL integration coverage") }
+	dsn := os.Getenv("AEVOR_TEST_DATABASE_DSN")
+	if dsn == "" { t.Skip("set AEVOR_TEST_DATABASE_DSN to run PostgreSQL integration coverage") }
 
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil { t.Fatalf("connect PostgreSQL: %v", err) }
