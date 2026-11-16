@@ -64,6 +64,12 @@ func main() {
 	}
 
 	log.Println("selected-repository migration completed")
+
+	log.Println("running background-job migrations")
+	if err := jobs.Migrate(db); err != nil {
+		log.Fatal("failed to migrate background_jobs table: ", err)
+	}
+	log.Println("background-job migration completed")
 	log.Println("running webhook target migrations")
 	err = webhook.Migrate(db)
 	if err != nil {
@@ -134,8 +140,9 @@ func main() {
 		nil, // jobService set after registration
 	)
 
-	// Create job service for background work.
-	jobStore := jobs.NewMemoryStore()
+	// The production API uses PostgreSQL-backed jobs. The in-memory store
+	// remains available to isolated unit tests and local package tests.
+	jobStore := jobs.NewPostgresStore(db)
 	jobRegistry := jobs.NewRegistry()
 	repositories.RegisterJobDefinitions(jobRegistry, repositoriesService)
 	jobService, err := jobs.NewService(jobStore, jobs.Options{
