@@ -139,17 +139,26 @@ func (w *Worker) runJob(parent context.Context, job *Job) error {
 	now := time.Now().UTC()
 	job.CurrentStage, job.Result = executor.snapshot()
 	job.UpdatedAt = now
+
+	// Distinguish an explicit owner cancellation from server shutdown. A
+	// shutdown leaves the running row and lease intact; another process will
+	// recover it after expiry. Only the explicit cancel endpoint is terminal.
+	latest, latestErr := w.service.store.Get(context.Background(), job.UserID, job.SelectedRepositoryID, job.ID)
+	explicitlyCancelled := latestErr == nil && latest.Status == StatusCancelRequested
+	if parent.Err() != nil && !explicitlyCancelled {
+		return nil
+	}
+
 	job.LeaseOwner = ""
 	job.LeaseExpiresAt = nil
-
-	if runErr == nil {
-		job.Status = StatusSucceeded
+	if explicitlyCancelled || (runCtx.Err() != nil && errors.Is(runCtx.Err(), context.Canceled)) {
+		job.Status = StatusCancelled
+		job.CancelledAt = timePtr(now)
 		job.CompletedAt = timePtr(now)
 		job.ErrorCategory = ""
 		job.ErrorReference = ""
-	} else if runCtx.Err() != nil && errors.Is(runCtx.Err(), context.Canceled) {
-		job.Status = StatusCancelled
-		job.CancelledAt = timePtr(now)
+	} else if runErr == nil {
+		job.Status = StatusSucceeded
 		job.CompletedAt = timePtr(now)
 		job.ErrorCategory = ""
 		job.ErrorReference = ""
