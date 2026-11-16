@@ -1,0 +1,33 @@
+name: Format durable job implementation
+
+on:
+  push:
+    branches:
+      - feat-durable-postgres-job-store
+
+permissions:
+  contents: write
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat-durable-postgres-job-store
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.1
+      - name: Format changed Go files
+        working-directory: services/api
+        run: |
+          gofmt -w internal/jobs/*.go internal/repositories/clone_test.go
+      - name: Commit formatting
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add services/api/internal/jobs/*.go services/api/internal/repositories/clone_test.go
+          if ! git diff --cached --quiet; then
+            git commit -m "style(jobs): format durable job implementation"
+            git push origin HEAD:feat-durable-postgres-job-store
+          fi
