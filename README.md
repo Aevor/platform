@@ -13,6 +13,7 @@ The API connects a user's GitHub account, gives them access to selected reposito
 - **Issue workflow:** analyze an issue, propose a solution, generate a reviewable change set, approve it, apply it to the workspace, validate it, and explicitly publish a branch / commit / pull request.
 - **Pull-request review:** retrieve pull-request details and run a separate analysis of review feedback.
 - **Supporting endpoints:** health and readiness checks, contribution summary, skills, recommendations, and asynchronous job handling.
+- **Background jobs:** job state is persisted in PostgreSQL, with atomic worker claims, expiring leases, bounded retries, owner-scoped idempotency, and completed-record retention. See [background jobs](docs/background-jobs.md) for the lifecycle and integration-test setup.
 
 The route registration in `services/api/cmd/server/main.go` is the source of truth for the current HTTP surface. This is an actively developed API, not a claim that the whole product is deployed or production-ready.
 
