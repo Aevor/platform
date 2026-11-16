@@ -25,6 +25,7 @@ import (
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/indexing"
+	"github.com/Aevor/platform/services/api/internal/jobs"
 	"github.com/Aevor/platform/services/api/internal/representation"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/workspace"
@@ -110,6 +111,8 @@ type cloneFixture struct {
 	service    *Service
 	cloner     *fakeCloner
 	jwtManager *auth.JWTManager
+	jobService *jobs.Service
+	jobWorker  *jobs.Worker
 }
 
 const (
@@ -195,8 +198,32 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 	)
 	service.ConfigureCloneURLPolicy(workspace.DefaultAllowedHosts, true)
 
+	// The handler tests use deterministic jobs: indexing succeeds, while the
+	// intelligence-refresh fixture fails with a safe, non-retryable category.
+	registry := jobs.NewRegistry()
+	registry.MustRegister(jobs.Definition{
+		Type: JobTypeRepositoryIndex,
+		MaxAttempts: 1,
+		Run: func(context.Context, *jobs.Job, *jobs.Executor) error { return nil },
+	})
+	registry.MustRegister(jobs.Definition{
+		Type: JobTypeIntelligenceRefresh,
+		MaxAttempts: 1,
+		Classify: func(error) jobs.ErrorCategory { return jobs.CategoryValidationError },
+		Run: func(context.Context, *jobs.Job, *jobs.Executor) error { return errors.New("fixture failure; not persisted") },
+	})
+	jobService, err := jobs.NewService(jobs.NewMemoryStore(), jobs.Options{
+		Registry: registry,
+		Recorder: service,
+	})
+	if err != nil {
+		t.Fatalf("job service: %v", err)
+	}
+	service.SetJobsService(jobService)
+	jobWorker := jobs.NewWorker(jobService, "test-worker", jobs.WorkerOptions{})
+
 	jwtManager := auth.NewJWTManager([]byte(testJWTSecret))
-	handler := NewHandler(service)
+	handler := NewHandlerWithJobs(service, jobService)
 
 	router := gin.New()
 	router.POST(
@@ -229,6 +256,11 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 		auth.RequireAuth(jwtManager),
 		handler.Represent,
 	)
+	router.GET("/repositories/:id/jobs", auth.RequireAuth(jwtManager), handler.ListJobs)
+	router.GET("/repositories/:id/jobs/:jobID", auth.RequireAuth(jwtManager), handler.GetJob)
+	router.GET("/repositories/:id/jobs/:jobID/events", auth.RequireAuth(jwtManager), handler.ListJobEvents)
+	router.POST("/repositories/:id/jobs/:jobID/cancel", auth.RequireAuth(jwtManager), handler.CancelJob)
+	router.POST("/repositories/:id/jobs/:jobID/retry", auth.RequireAuth(jwtManager), handler.RetryJob)
 
 	fixture := &cloneFixture{
 		router:     router,
@@ -237,12 +269,24 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 		service:    service,
 		cloner:     cloner,
 		jwtManager: jwtManager,
+		jobService: jobService,
+		jobWorker:  jobWorker,
 	}
 
 	fixture.addSelected(cloneSelected, cloneUserID)
 	fixture.addSelected(cloneSelectedFg, cloneForeignID)
 
 	return fixture
+}
+
+func (f *cloneFixture) drainJobs(t *testing.T) {
+	t.Helper()
+	if f.jobWorker == nil {
+		t.Fatal("job worker is not initialized")
+	}
+	if _, err := f.jobWorker.ProcessNow(context.Background(), 100); err != nil {
+		t.Fatalf("drain job worker: %v", err)
+	}
 }
 
 func (f *cloneFixture) addSelected(id uuid.UUID, userID uuid.UUID) {
