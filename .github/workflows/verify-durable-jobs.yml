@@ -1,0 +1,24 @@
+name: Verify durable jobs package
+
+on:
+  push:
+    branches:
+      - feat-durable-postgres-job-store
+
+permissions:
+  contents: read
+
+jobs:
+  jobs-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat-durable-postgres-job-store
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.1
+          cache-dependency-path: services/api/go.sum
+      - name: Test durable job engine with race detector
+        working-directory: services/api
+        run: go test -race ./internal/jobs -count=1
