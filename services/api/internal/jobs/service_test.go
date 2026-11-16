@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -15,7 +16,7 @@ func TestService_EnqueueValidatesAndBoundsPayload(t *testing.T) {
 	registry.MustRegister(Definition{
 		Type: "issue.analysis",
 		MaxAttempts: 3,
-		ValidatePayload: func(raw []byte) (any, error) {
+		ValidatePayload: func(raw json.RawMessage) (any, error) {
 			if string(raw) != `{"issue_id":"00000000-0000-4000-8000-000000000001"}` {
 				return nil, errors.New("invalid issue reference")
 			}
