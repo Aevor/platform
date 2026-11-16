@@ -37,7 +37,7 @@ type Handler struct {
 }
 
 func NewHandler(service *Service) *Handler {
-	return &Handler{service: service, jobs: service.jobs}
+	return &Handler{service: service}
 }
 
 // NewHandlerWithJobs wires the same shared job service used by the API worker.
