@@ -17,6 +17,7 @@ import (
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/indexing"
+	"github.com/Aevor/platform/services/api/internal/jobs"
 	"github.com/Aevor/platform/services/api/internal/representation"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/workspace"
@@ -67,6 +68,9 @@ type Service struct {
 	// External AI analysis service client (Task 3h). nil when AI analysis
 	// is not configured; AnalyzeRepositoryContent fails closed in that case.
 	aiClient *ai.Client
+
+	// jobs is shared by HTTP handlers and the background worker.
+	jobs *jobs.Service
 }
 
 func NewService(
@@ -83,6 +87,7 @@ func NewService(
 	representer *representation.Service,
 	index *indexing.Index,
 	aiClient *ai.Client,
+	_ ...any,
 ) *Service {
 	return &Service{
 		users:             userService,
@@ -1035,4 +1040,11 @@ func (s *Service) extractAndChunk(
 		chunkResult.TotalChunks, chunkResult.TotalBytes)
 
 	return extractionResult, chunkResult, nil
+}
+
+// SetJobsService injects the shared job service after its repository-bound
+// definitions have been registered. The same instance is used by handlers and
+// the worker so durable state and cancellation remain consistent.
+func (s *Service) SetJobsService(service *jobs.Service) {
+	s.jobs = service
 }
