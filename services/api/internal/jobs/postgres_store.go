@@ -173,7 +173,7 @@ func (s *PostgresStore) Claim(ctx context.Context, workerID string, now, leaseUn
 
 func (s *PostgresStore) RenewLease(ctx context.Context, jobID uuid.UUID, workerID string, leaseUntil time.Time) error {
 	result := s.db.WithContext(ctx).Model(&Job{}).
-		Where("id = ? AND lease_owner = ? AND status IN ?", jobID, workerID, []string{StatusRunning, StatusCancelRequested}).
+		Where("id = ? AND lease_owner = ? AND status IN ? AND lease_expires_at > ?", jobID, workerID, []string{StatusRunning, StatusCancelRequested}, time.Now().UTC()).
 		Updates(map[string]any{"lease_expires_at": leaseUntil, "updated_at": time.Now().UTC()})
 	if result.Error != nil {
 		return result.Error
