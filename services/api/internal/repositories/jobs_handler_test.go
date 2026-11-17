@@ -39,6 +39,9 @@ func enqueueFixtureJob(t *testing.T, fixture *cloneFixture, typ string, payload 
 func failedIntelligenceJob(t *testing.T, fixture *cloneFixture) *jobs.Job {
 	t.Helper()
 
+	// Force the real AI-dependent refresh definition down its failure path;
+	// the job engine must persist a bounded category/reference, not raw error.
+	fixture.service.aiClient = nil
 	job := enqueueFixtureJob(t, fixture, JobTypeIntelligenceRefresh, intelligenceRefreshPayload{IncludeAI: true}, "test-fail-refresh")
 	fixture.drainJobs(t)
 
