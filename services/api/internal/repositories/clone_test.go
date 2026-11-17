@@ -197,6 +197,8 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 		representation.NewService(),
 		indexing.New(indexing.Options{}),
 		nil,
+		"",
+		nil,
 	)
 	service.ConfigureCloneURLPolicy(workspace.DefaultAllowedHosts, true)
 
