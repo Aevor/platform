@@ -21,6 +21,7 @@ const (
 
 var (
 	ErrNotFound        = errors.New("job not found")
+	ErrAlreadyExists   = errors.New("job already exists")
 	ErrNotActive       = errors.New("job is not active")
 	ErrNotFailed       = errors.New("job is not failed")
 	ErrNotTerminal     = errors.New("job is not terminal")
@@ -101,7 +102,6 @@ type ListOptions struct {
 	Type   string
 	Limit  int
 	Offset int
-	Count  bool
 }
 
 type Definition struct {
@@ -132,6 +132,7 @@ type EventRecorder interface {
 type Store interface {
 	Insert(context.Context, *Job) (*Job, bool, error)
 	Get(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) (*Job, error)
+	FindByIdempotencyKey(context.Context, uuid.UUID, uuid.UUID, string) (*Job, error)
 	List(context.Context, uuid.UUID, uuid.UUID, ListOptions) ([]Job, int, error)
 	Claim(context.Context, string, time.Time, time.Time) (*Job, error)
 	RenewLease(context.Context, uuid.UUID, string, time.Time) error
@@ -171,6 +172,8 @@ func cloneJob(job *Job) *Job {
 	return &out
 }
 
-func terminal(status string) bool {
+func IsTerminal(status string) bool {
 	return status == StatusSucceeded || status == StatusFailed || status == StatusCancelled
 }
+
+func terminal(status string) bool { return IsTerminal(status) }
