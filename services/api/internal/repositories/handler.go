@@ -17,6 +17,7 @@ import (
 	"github.com/Aevor/platform/services/api/internal/filtering"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/indexing"
+	"github.com/Aevor/platform/services/api/internal/jobs"
 	"github.com/Aevor/platform/services/api/internal/representation"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/workspace"
@@ -32,12 +33,17 @@ var errInvalidPagination = errors.New("invalid pagination parameters")
 
 type Handler struct {
 	service *Service
+	jobs    *jobs.Service
 }
 
 func NewHandler(service *Service) *Handler {
-	return &Handler{
-		service: service,
-	}
+	return &Handler{service: service}
+}
+
+// NewHandlerWithJobs wires the same shared job service used by the API worker.
+func NewHandlerWithJobs(service *Service, jobService *jobs.Service) *Handler {
+	service.SetJobsService(jobService)
+	return &Handler{service: service, jobs: service.GetJobsService()}
 }
 
 // List handles GET /repositories. The Aevor identity comes exclusively from

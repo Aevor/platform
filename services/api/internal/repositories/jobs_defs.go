@@ -15,6 +15,7 @@ import (
 // clients enqueue and filter by them, and the frontend surfaces them directly.
 const (
 	JobTypeRepositoryIndex     = "repository.index"
+	JobTypeRepositorySync      = "repository.sync"
 	JobTypeIntelligenceRefresh = "repository.intelligence_refresh"
 	JobTypeIssueAnalysis       = "issue.analysis"
 	JobTypeSolutionProposal    = "issue.solution_proposal"
@@ -96,6 +97,17 @@ func validatePullRequestPayload(raw json.RawMessage) (any, error) {
 	return payload, nil
 }
 
+func validateWebhookSyncPayload(raw json.RawMessage) (any, error) {
+	var payload WebhookSyncPayload
+	if err := unmarshalJobPayload(raw, &payload); err != nil {
+		return nil, err
+	}
+	if payload.TargetID == uuid.Nil {
+		return nil, errors.New("target_id is required")
+	}
+	return payload, nil
+}
+
 // RegisterJobDefinitions registers every background job type the domain layer
 // can execute. Definitions close over the Service; registration happens once
 // at wiring time (main.go) before any worker starts.
@@ -112,11 +124,13 @@ func RegisterJobDefinitions(reg *jobs.Registry, s *Service) {
 		Run: func(ctx context.Context, job *jobs.Job, exec *jobs.Executor) error {
 			result, err := s.IndexRepositoryContent(ctx, job.UserID, job.SelectedRepositoryID)
 			if err == nil {
-				exec.SetResult(indexJobResult{
+				if err := exec.SetResult(indexJobResult{
 					RepositoryID: job.SelectedRepositoryID,
 					Files:        result.Files,
 					Chunks:       result.Chunks,
-				})
+				}); err != nil {
+					return err
+				}
 			}
 			return err
 		},
@@ -209,6 +223,23 @@ func RegisterJobDefinitions(reg *jobs.Registry, s *Service) {
 				return err
 			}
 			_, err := s.ValidateChangeSet(ctx, job.UserID, job.SelectedRepositoryID, payload.IssueID, payload.ChangeSetID)
+			return err
+		},
+	})
+
+	reg.MustRegister(jobs.Definition{
+		Type:            JobTypeRepositorySync,
+		Description:     "Synchronizes the owner-scoped repository changes represented by a GitHub webhook target",
+		ValidatePayload: validateWebhookSyncPayload,
+		Timeout:         10 * time.Minute,
+		MaxAttempts:     5,
+		Classify:        s.classifyJobError,
+		Run: func(ctx context.Context, job *jobs.Job, exec *jobs.Executor) error {
+			var payload WebhookSyncPayload
+			if err := unmarshalJobPayload(job.Payload, &payload); err != nil {
+				return err
+			}
+			_, err := s.ProcessWebhookTarget(ctx, payload.TargetID)
 			return err
 		},
 	})

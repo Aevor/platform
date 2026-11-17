@@ -10,13 +10,13 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/Aevor/platform/services/api/internal/ai"
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/bodylimit"
 	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/cors"
-	"github.com/Aevor/platform/services/api/internal/diagnostics"
 	"github.com/Aevor/platform/services/api/internal/discovery"
 	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
@@ -29,7 +29,6 @@ import (
 	"github.com/Aevor/platform/services/api/internal/requestid"
 	"github.com/Aevor/platform/services/api/internal/securityheaders"
 	"github.com/Aevor/platform/services/api/internal/users"
-	"github.com/Aevor/platform/services/api/internal/webhook"
 	"github.com/Aevor/platform/services/api/internal/workspace"
 	"github.com/Aevor/platform/services/api/pkg/config"
 	"github.com/Aevor/platform/services/api/pkg/database"
@@ -64,12 +63,12 @@ func main() {
 	}
 
 	log.Println("selected-repository migration completed")
-	log.Println("running webhook target migrations")
-	err = webhook.Migrate(db)
-	if err != nil {
-		log.Fatal("failed to migrate webhook_targets table: ", err)
+
+	log.Println("running background-job migrations")
+	if err := jobs.Migrate(db); err != nil {
+		log.Fatal("failed to migrate background_jobs table: ", err)
 	}
-	log.Println("webhook target migration completed")
+	log.Println("background-job migration completed")
 
 	userRepository := users.NewRepository(db)
 	userService := users.NewService(userRepository)
@@ -134,8 +133,14 @@ func main() {
 		nil, // jobService set after registration
 	)
 
-	// Create job service for background work.
-	jobStore := jobs.NewMemoryStore()
+	// Repositories.Migrate owns the delivery/target tables; the store is
+	// constructed with the shared database before the dispatcher starts.
+	webhookStore := repositories.NewGormWebhookStore(db)
+	repositoriesService.ConfigureWebhookStore(webhookStore)
+
+	// The production API uses PostgreSQL-backed jobs. The in-memory store
+	// remains available to isolated unit tests and local package tests.
+	jobStore := jobs.NewPostgresStore(db)
 	jobRegistry := jobs.NewRegistry()
 	repositories.RegisterJobDefinitions(jobRegistry, repositoriesService)
 	jobService, err := jobs.NewService(jobStore, jobs.Options{
@@ -155,13 +160,14 @@ func main() {
 	)
 	repositoriesHandler := repositories.NewHandlerWithJobs(repositoriesService, jobService)
 
-	// Set DB on webhook store so it can persist targets.
-	repositoriesService.GetWebhookStore().SetDB(db)
-
-	// Start job worker in background.
-	jobWorker := jobs.NewWorker(jobService, "api-worker", jobs.WorkerOptions{})
+	// Start shared-database workers. An empty worker ID asks NewWorker to
+	// generate a unique per-process lease owner (never a shared constant).
+	jobWorker := jobs.NewWorker(jobService, "", jobs.WorkerOptions{})
 	go jobWorker.Start()
 	defer jobWorker.Shutdown(ctx)
+
+	webhookDispatcher := repositories.NewWebhookDispatcher(webhookStore, jobService, uuid.NewString())
+	go webhookDispatcher.Run(ctx)
 
 	// Rate limiter for public endpoints (auth, webhooks)
 	rateLimiter := ratelimit.NewInMemoryLimiter()

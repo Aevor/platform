@@ -182,7 +182,6 @@ func (h *Handler) ListJobs(c *gin.Context) {
 		Type:   typ,
 		Limit:  perPage,
 		Offset: (page - 1) * perPage,
-		Count:  true,
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal"})

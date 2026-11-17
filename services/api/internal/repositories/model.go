@@ -198,3 +198,74 @@ func (c *RepositoryCommit) BeforeCreate(tx *gorm.DB) error {
 
 	return nil
 }
+
+// GitHubWebhookDelivery is the durable, deduplicated receipt of a signed
+// GitHub delivery. The original request body is deliberately not retained;
+// only the event classification and routing metadata survive processing.
+type GitHubWebhookDelivery struct {
+	ID           uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	DeliveryID   string     `gorm:"size:64;uniqueIndex;not null" json:"delivery_id"`
+	Event        string     `gorm:"size:64;not null;index" json:"event"`
+	Action       string     `gorm:"size:64" json:"action,omitempty"`
+	RepositoryID *int64     `gorm:"index" json:"repository_id,omitempty"`
+	Ignored      bool       `gorm:"not null;default:false" json:"ignored"`
+	ReceivedAt   time.Time  `gorm:"not null;index" json:"received_at"`
+	ProcessedAt  *time.Time `json:"processed_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+func (GitHubWebhookDelivery) TableName() string { return "github_webhook_deliveries" }
+
+func (d *GitHubWebhookDelivery) BeforeCreate(tx *gorm.DB) error {
+	if d.ID == uuid.Nil {
+		d.ID = uuid.New()
+	}
+	if d.ReceivedAt.IsZero() {
+		d.ReceivedAt = time.Now().UTC()
+	}
+	return nil
+}
+
+// GitHubWebhookTarget represents one owner-scoped unit of work produced by a
+// delivery. A repository selected by several Aevor users fans out into one
+// target per selected-repository context.
+type GitHubWebhookTarget struct {
+	ID                   uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	DeliveryID           uuid.UUID  `gorm:"type:uuid;index;not null" json:"delivery_id"`
+	SelectedRepositoryID uuid.UUID  `gorm:"type:uuid;index;not null" json:"selected_repository_id"`
+	UserID               uuid.UUID  `gorm:"type:uuid;index;not null" json:"user_id"`
+	GithubRepositoryID   int64      `gorm:"not null;index" json:"github_repository_id"`
+	Operation            string     `gorm:"size:32;not null" json:"operation"`
+	IssueNumber          *int       `json:"issue_number,omitempty"`
+	PullRequestNumber    *int       `json:"pull_request_number,omitempty"`
+	HeadSHA              string     `gorm:"size:40" json:"head_sha,omitempty"`
+	Status               string     `gorm:"size:24;not null;index" json:"status"`
+	JobID                *uuid.UUID `gorm:"type:uuid;index" json:"job_id,omitempty"`
+	Attempts             int        `gorm:"not null;default:0" json:"attempts"`
+	ErrorCategory        string     `gorm:"size:32" json:"error_category,omitempty"`
+	ErrorReference       string     `gorm:"size:255" json:"error_reference,omitempty"`
+	ReceivedAt           time.Time  `gorm:"not null;index" json:"received_at"`
+	EnqueuedAt           *time.Time `json:"enqueued_at,omitempty"`
+	StartedAt            *time.Time `json:"started_at,omitempty"`
+	CompletedAt          *time.Time `json:"completed_at,omitempty"`
+	LeaseOwner           string     `gorm:"size:128;not null;default:'';index" json:"-"`
+	LeaseExpiresAt       *time.Time `gorm:"index" json:"-"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
+func (GitHubWebhookTarget) TableName() string { return "github_webhook_targets" }
+
+func (t *GitHubWebhookTarget) BeforeCreate(tx *gorm.DB) error {
+	if t.ID == uuid.Nil {
+		t.ID = uuid.New()
+	}
+	if t.ReceivedAt.IsZero() {
+		t.ReceivedAt = time.Now().UTC()
+	}
+	if t.Status == "" {
+		t.Status = WebhookTargetStatusReceived
+	}
+	return nil
+}

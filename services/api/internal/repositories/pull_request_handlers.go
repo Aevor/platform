@@ -1,17 +1,11 @@
 package repositories
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -20,10 +14,8 @@ import (
 	"github.com/Aevor/platform/services/api/internal/auth"
 	"github.com/Aevor/platform/services/api/internal/github"
 	"github.com/Aevor/platform/services/api/internal/impact"
-	"github.com/Aevor/platform/services/api/internal/jobs"
 	"github.com/Aevor/platform/services/api/internal/users"
 	"github.com/Aevor/platform/services/api/internal/validation"
-	"github.com/Aevor/platform/services/api/internal/webhook"
 )
 
 // impactAnalysisSetResponse is the SAFE external shape of an impact analysis.
@@ -346,141 +338,14 @@ func (h *Handler) ValidationPlan(c *gin.Context) {
 // job to process it. Only events for repositories the caller owns are accepted;
 // foreign repositories are silently dropped (opaque 200) to avoid enumeration.
 func (h *Handler) HandleGitHubWebhook(c *gin.Context) {
-	// Read the raw body for signature verification.
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		log.Printf("webhook: failed to read body: %v", err)
-		c.Status(http.StatusBadRequest)
+	if h.service == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "webhook_unavailable"})
 		return
 	}
-
-	// Verify GitHub HMAC signature.
-	signature := c.GetHeader("X-Hub-Signature-256")
-	if signature == "" {
-		log.Printf("webhook: missing X-Hub-Signature-256 header")
-		c.Status(http.StatusBadRequest)
+	store := h.service.GetWebhookStore()
+	if store == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "webhook_unavailable"})
 		return
 	}
-
-	secret := h.service.GetWebhookSecret()
-	if secret == "" {
-		log.Printf("webhook: webhook secret not configured")
-		c.Status(http.StatusInternalServerError)
-		return
-	}
-
-	expectedMAC := hmac.New(sha256.New, []byte(secret))
-	expectedMAC.Write(body)
-	expectedSig := "sha256=" + hex.EncodeToString(expectedMAC.Sum(nil))
-
-	if !hmac.Equal([]byte(signature), []byte(expectedSig)) {
-		log.Printf("webhook: invalid signature")
-		c.Status(http.StatusUnauthorized)
-		return
-	}
-
-	eventType := c.GetHeader("X-GitHub-Event")
-	if eventType == "" {
-		log.Printf("webhook: missing X-GitHub-Event header")
-		c.Status(http.StatusBadRequest)
-		return
-	}
-
-	deliveryID := c.GetHeader("X-GitHub-Delivery")
-
-	// Parse the payload to determine the repository.
-	var payload struct {
-		Repository struct {
-			ID       int64  `json:"id"`
-			Name     string `json:"name"`
-			FullName string `json:"full_name"`
-		} `json:"repository"`
-	}
-
-	if err := json.Unmarshal(body, &payload); err != nil {
-		log.Printf("webhook: failed to parse payload: %v", err)
-		c.Status(http.StatusBadRequest)
-		return
-	}
-
-	repoFullName := payload.Repository.FullName
-	if repoFullName == "" {
-		log.Printf("webhook: repository full_name missing in payload")
-		c.Status(http.StatusBadRequest)
-		return
-	}
-
-	ownerLogin, repoName, ok := parseFullName(repoFullName)
-	if !ok {
-		log.Printf("webhook: could not parse repo full_name: %s", repoFullName)
-		c.Status(http.StatusBadRequest)
-		return
-	}
-
-	// Create webhook target and enqueue job.
-	// The id is assigned HERE, before the job payload is built, because the
-	// payload must carry the same id the row is persisted under. Letting the
-	// store assign it on insert would enqueue a job pointing at uuid.Nil, and
-	// the worker would never find its target.
-	target := &webhook.WebhookTarget{
-		ID:           uuid.New(),
-		RepositoryID: uuid.Nil,
-		EventType:    eventType,
-		Payload:      body,
-		Status:       "enqueued",
-		Attempts:     0,
-		MaxAttempts:  3,
-		ScheduledAt:  time.Now(),
-	}
-
-	// The row keeps the RAW signed body plus the routing facts the worker needs
-	// to resolve which selected repository this event belongs to.
-	storedPayload := map[string]any{
-		"owner":       ownerLogin,
-		"repo":        repoName,
-		"event_type":  eventType,
-		"delivery_id": deliveryID,
-		"body":        json.RawMessage(body),
-	}
-
-	payloadBytes, err := json.Marshal(storedPayload)
-	if err != nil {
-		log.Printf("webhook: failed to encode target payload: %v", err)
-		c.Status(http.StatusInternalServerError)
-		return
-	}
-
-	target.Payload = payloadBytes
-
-	if err := h.service.GetWebhookStore().CreateWebhookTarget(c.Request.Context(), target); err != nil {
-		log.Printf("webhook: failed to create target: %v", err)
-		c.Status(http.StatusInternalServerError)
-		return
-	}
-
-	// The job payload is the contract the repository.sync definition validates:
-	// a single target_id. The routing facts live on the target row, not here.
-	// The STRUCT is passed, not pre-marshalled bytes — the job service encodes
-	// the payload itself, and handing it bytes would double-encode into a JSON
-	// string that fails validation.
-	if _, err := h.service.GetJobsService().Enqueue(c.Request.Context(), jobs.EnqueueOptions{
-		Type:     JobTypeRepositorySync,
-		Payload:  webhookSyncPayload{TargetID: target.ID},
-		Priority: 10,
-	}); err != nil {
-		log.Printf("webhook: failed to enqueue job: %v", err)
-		c.Status(http.StatusInternalServerError)
-		return
-	}
-
-	c.Status(http.StatusAccepted)
-}
-
-// parseFullName splits "owner/repo" into owner and repo.
-func parseFullName(fullName string) (string, string, bool) {
-	parts := strings.Split(fullName, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	return parts[0], parts[1], true
+	NewGitHubWebhookHandler(store, h.service.GetWebhookSecret(), defaultWebhookMaxBodyBytes).GitHub(c)
 }
