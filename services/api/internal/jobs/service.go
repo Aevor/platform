@@ -204,7 +204,7 @@ type Executor struct {
 	stage          string
 	result         json.RawMessage
 	maxResultBytes int
-	resultTooLarge bool
+	resultErr      error
 }
 
 func newExecutor(maxResultBytes int) *Executor {
@@ -212,28 +212,34 @@ func newExecutor(maxResultBytes int) *Executor {
 }
 
 func (e *Executor) SetStage(stage string) {
-	if len(stage) > 64 {
-		stage = stage[:64]
-	}
+	runes := []rune(stage)
+	if len(runes) > 64 { stage = string(runes[:64]) }
 	e.mu.Lock()
 	e.stage = stage
 	e.mu.Unlock()
 }
 
-func (e *Executor) SetResult(value any) {
+func (e *Executor) SetResult(value any) error {
 	raw, err := json.Marshal(value)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if err != nil || len(raw) > e.maxResultBytes {
+	if err != nil {
 		e.result = nil
-		e.resultTooLarge = len(raw) > e.maxResultBytes
-		return
+		e.resultErr = fmt.Errorf("encode job result: %w", err)
+		return e.resultErr
+	}
+	if len(raw) > e.maxResultBytes {
+		e.result = nil
+		e.resultErr = ErrResultTooLarge
+		return e.resultErr
 	}
 	e.result = append(json.RawMessage(nil), raw...)
+	e.resultErr = nil
+	return nil
 }
 
-func (e *Executor) snapshot() (string, json.RawMessage) {
+func (e *Executor) snapshot() (string, json.RawMessage, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.stage, append(json.RawMessage(nil), e.result...)
+	return e.stage, append(json.RawMessage(nil), e.result...), e.resultErr
 }
