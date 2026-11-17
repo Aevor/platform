@@ -64,6 +64,8 @@ func newTestService(
 		representation.NewService(),
 		indexing.New(indexing.Options{}),
 		nil,
+		"",
+		nil,
 	)
 }
 
@@ -198,20 +200,25 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 	)
 	service.ConfigureCloneURLPolicy(workspace.DefaultAllowedHosts, true)
 
-	// The handler tests use deterministic jobs: indexing succeeds, while the
-	// intelligence-refresh fixture fails with a safe, non-retryable category.
+	// The fixture keeps indexing deterministic, but intelligence refresh
+	// executes the real service path so async profile tests exercise persistence.
 	registry := jobs.NewRegistry()
 	registry.MustRegister(jobs.Definition{
 		Type:        JobTypeRepositoryIndex,
+		Description: "Fixture repository index",
 		MaxAttempts: 1,
 		Run:         func(context.Context, *jobs.Job, *jobs.Executor) error { return nil },
 	})
 	registry.MustRegister(jobs.Definition{
 		Type:        JobTypeIntelligenceRefresh,
+		Description: "Refreshes the fixture repository intelligence profile",
 		MaxAttempts: 1,
-		Classify:    func(error) jobs.ErrorCategory { return jobs.CategoryValidationError },
-		Run: func(context.Context, *jobs.Job, *jobs.Executor) error {
-			return errors.New("fixture failure; not persisted")
+		Classify:    service.classifyJobError,
+		Run: func(ctx context.Context, job *jobs.Job, _ *jobs.Executor) error {
+			var payload intelligenceRefreshPayload
+			if err := json.Unmarshal(job.Payload, &payload); err != nil { return err }
+			_, err := service.RefreshIntelligence(ctx, job.UserID, job.SelectedRepositoryID, payload.IncludeAI)
+			return err
 		},
 	})
 	jobService, err := jobs.NewService(jobs.NewMemoryStore(), jobs.Options{
