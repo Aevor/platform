@@ -17,7 +17,6 @@ import (
 	"github.com/Aevor/platform/services/api/internal/bodylimit"
 	"github.com/Aevor/platform/services/api/internal/chunking"
 	"github.com/Aevor/platform/services/api/internal/cors"
-	"github.com/Aevor/platform/services/api/internal/diagnostics"
 	"github.com/Aevor/platform/services/api/internal/discovery"
 	"github.com/Aevor/platform/services/api/internal/extraction"
 	"github.com/Aevor/platform/services/api/internal/filtering"
