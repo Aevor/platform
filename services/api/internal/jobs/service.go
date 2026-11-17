@@ -213,7 +213,9 @@ func newExecutor(maxResultBytes int) *Executor {
 
 func (e *Executor) SetStage(stage string) {
 	runes := []rune(stage)
-	if len(runes) > 64 { stage = string(runes[:64]) }
+	if len(runes) > 64 {
+		stage = string(runes[:64])
+	}
 	e.mu.Lock()
 	e.stage = stage
 	e.mu.Unlock()

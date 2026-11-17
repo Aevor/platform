@@ -73,7 +73,7 @@ type Service struct {
 	jobs *jobs.Service
 
 	// Webhook deliveries and targets are durable and shared across API instances.
-	webhookStore WebhookStore
+	webhookStore  WebhookStore
 	webhookSecret string
 }
 

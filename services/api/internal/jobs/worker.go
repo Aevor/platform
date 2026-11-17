@@ -34,16 +34,32 @@ type Worker struct {
 }
 
 func NewWorker(service *Service, workerID string, options WorkerOptions) *Worker {
-	if options.PollInterval <= 0 { options.PollInterval = time.Second }
-	if options.LeaseDuration <= 0 { options.LeaseDuration = 2 * time.Minute }
+	if options.PollInterval <= 0 {
+		options.PollInterval = time.Second
+	}
+	if options.LeaseDuration <= 0 {
+		options.LeaseDuration = 2 * time.Minute
+	}
 	// A lease must be long enough for heartbeat cadence, scheduler jitter,
 	// and a short database round trip. Tiny test leases are clamped as well.
-	if options.LeaseDuration < 300*time.Millisecond { options.LeaseDuration = 300 * time.Millisecond }
-	if options.BatchSize <= 0 { options.BatchSize = 10 }
-	if options.RetryBaseDelay <= 0 { options.RetryBaseDelay = 5 * time.Second }
-	if options.RetryMaxDelay <= 0 { options.RetryMaxDelay = 5 * time.Minute }
-	if options.Retention <= 0 { options.Retention = 30 * 24 * time.Hour }
-	if workerID == "" { workerID = uuid.NewString() }
+	if options.LeaseDuration < 300*time.Millisecond {
+		options.LeaseDuration = 300 * time.Millisecond
+	}
+	if options.BatchSize <= 0 {
+		options.BatchSize = 10
+	}
+	if options.RetryBaseDelay <= 0 {
+		options.RetryBaseDelay = 5 * time.Second
+	}
+	if options.RetryMaxDelay <= 0 {
+		options.RetryMaxDelay = 5 * time.Minute
+	}
+	if options.Retention <= 0 {
+		options.Retention = 30 * 24 * time.Hour
+	}
+	if workerID == "" {
+		workerID = uuid.NewString()
+	}
 	return &Worker{service: service, workerID: workerID, options: options, done: make(chan struct{})}
 }
 
@@ -93,7 +109,9 @@ func (w *Worker) Shutdown(ctx context.Context) {
 		w.finishOnce.Do(func() { close(w.done) })
 		return
 	}
-	if cancel != nil { cancel() }
+	if cancel != nil {
+		cancel()
+	}
 	select {
 	case <-w.done:
 	case <-ctx.Done():
@@ -101,14 +119,22 @@ func (w *Worker) Shutdown(ctx context.Context) {
 }
 
 func (w *Worker) ProcessNow(ctx context.Context, limit int) (int, error) {
-	if limit <= 0 { limit = w.options.BatchSize }
+	if limit <= 0 {
+		limit = w.options.BatchSize
+	}
 	processed := 0
 	for processed < limit {
-		if err := ctx.Err(); err != nil { return processed, err }
+		if err := ctx.Err(); err != nil {
+			return processed, err
+		}
 		now := time.Now().UTC()
 		job, err := w.service.store.Claim(ctx, w.workerID, now, now.Add(w.options.LeaseDuration))
-		if err != nil { return processed, err }
-		if job == nil { break }
+		if err != nil {
+			return processed, err
+		}
+		if job == nil {
+			break
+		}
 		processed++
 		if err := w.runJob(ctx, job); err != nil && !errors.Is(err, ErrLeaseLost) {
 			return processed, err
@@ -144,8 +170,12 @@ func (w *Worker) runJob(parent context.Context, job *Job) error {
 	checkCtx, checkCancel := context.WithTimeout(parent, 2*time.Second)
 	latest, checkErr := w.service.store.Get(checkCtx, job.UserID, job.SelectedRepositoryID, job.ID)
 	checkCancel()
-	if checkErr != nil { return checkErr }
-	if latest.Status == StatusCancelRequested { cancelRun() }
+	if checkErr != nil {
+		return checkErr
+	}
+	if latest.Status == StatusCancelRequested {
+		cancelRun()
+	}
 
 	started := time.Now()
 	w.service.record(parent, job, "JOB_STARTED", "started", 0, "", "")
@@ -165,7 +195,9 @@ func (w *Worker) runJob(parent context.Context, job *Job) error {
 
 	now := time.Now().UTC()
 	job.CurrentStage, job.Result, err = executor.snapshot()
-	if err != nil && runErr == nil { runErr = err }
+	if err != nil && runErr == nil {
+		runErr = err
+	}
 	job.UpdatedAt = now
 
 	// A handler that ignores its context cannot convert a timed-out execution
@@ -182,7 +214,9 @@ func (w *Worker) runJob(parent context.Context, job *Job) error {
 	lookupCtx, lookupCancel := context.WithTimeout(parent, 2*time.Second)
 	latest, latestErr := w.service.store.Get(lookupCtx, job.UserID, job.SelectedRepositoryID, job.ID)
 	lookupCancel()
-	if latestErr != nil { return latestErr }
+	if latestErr != nil {
+		return latestErr
+	}
 	explicitlyCancelled := latest.Status == StatusCancelRequested
 
 	job.LeaseOwner = ""
@@ -205,7 +239,9 @@ func (w *Worker) runJob(parent context.Context, job *Job) error {
 		} else if definition.Classify != nil {
 			category = definition.Classify(runErr)
 		}
-		if category == "" { category = CategoryInternalFailure }
+		if category == "" {
+			category = CategoryInternalFailure
+		}
 		job.ErrorCategory = category
 		job.ErrorReference = safeErrorReference(category)
 		if category.Retryable() && job.Attempts < job.MaxAttempts {
@@ -217,7 +253,9 @@ func (w *Worker) runJob(parent context.Context, job *Job) error {
 		}
 	}
 
-	if err := w.save(job); err != nil { return err }
+	if err := w.save(job); err != nil {
+		return err
+	}
 	duration := time.Since(started).Milliseconds()
 	switch job.Status {
 	case StatusSucceeded:
@@ -257,7 +295,10 @@ func (w *Worker) heartbeat(ctx context.Context, cancelRun context.CancelFunc, jo
 			err := w.service.store.RenewLease(ctx, job.ID, w.workerID, time.Now().UTC().Add(w.options.LeaseDuration))
 			if err != nil {
 				cancelRun()
-				select { case lost <- struct{}{}: default: }
+				select {
+				case lost <- struct{}{}:
+				default:
+				}
 				return
 			}
 			lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -265,7 +306,10 @@ func (w *Worker) heartbeat(ctx context.Context, cancelRun context.CancelFunc, jo
 			cancel()
 			if getErr != nil {
 				cancelRun()
-				select { case lost <- struct{}{}: default: }
+				select {
+				case lost <- struct{}{}:
+				default:
+				}
 				return
 			}
 			if current.Status == StatusCancelRequested {
@@ -279,20 +323,30 @@ func (w *Worker) heartbeat(ctx context.Context, cancelRun context.CancelFunc, jo
 func (w *Worker) retryDelay(attempt int) time.Duration {
 	power := math.Pow(2, float64(max(0, attempt-1)))
 	delay := time.Duration(float64(w.options.RetryBaseDelay) * power)
-	if delay > w.options.RetryMaxDelay { return w.options.RetryMaxDelay }
+	if delay > w.options.RetryMaxDelay {
+		return w.options.RetryMaxDelay
+	}
 	return delay
 }
 
 func safeErrorReference(category ErrorCategory) string {
 	switch category {
-	case CategoryAIServiceFailure: return "ai_service_failure"
-	case CategoryTimeout: return "operation_timeout"
-	case CategoryTransientExternalError: return "external_service_failure"
-	case CategoryDatabaseFailure: return "database_operation_failed"
-	case CategoryAuthorizationError: return "authorization_failed"
-	case CategoryValidationError: return "validation_failed"
-	case CategoryUserError: return "job_input_rejected"
-	default: return "job_execution_failed"
+	case CategoryAIServiceFailure:
+		return "ai_service_failure"
+	case CategoryTimeout:
+		return "operation_timeout"
+	case CategoryTransientExternalError:
+		return "external_service_failure"
+	case CategoryDatabaseFailure:
+		return "database_operation_failed"
+	case CategoryAuthorizationError:
+		return "authorization_failed"
+	case CategoryValidationError:
+		return "validation_failed"
+	case CategoryUserError:
+		return "job_input_rejected"
+	default:
+		return "job_execution_failed"
 	}
 }
 

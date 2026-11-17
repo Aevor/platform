@@ -65,11 +65,17 @@ func (s *PostgresStore) Get(ctx context.Context, userID, repositoryID, jobID uui
 }
 
 func (s *PostgresStore) FindByIdempotencyKey(ctx context.Context, userID, repositoryID uuid.UUID, key string) (*Job, error) {
-	if key == "" { return nil, ErrNotFound }
+	if key == "" {
+		return nil, ErrNotFound
+	}
 	var job Job
 	err := s.db.WithContext(ctx).Where("user_id = ? AND selected_repository_id = ? AND idempotency_key = ?", userID, repositoryID, key).First(&job).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
-	if err != nil { return nil, err }
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
 	return cloneJob(&job), nil
 }
 

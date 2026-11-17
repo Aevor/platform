@@ -199,7 +199,6 @@ func (c *RepositoryCommit) BeforeCreate(tx *gorm.DB) error {
 	return nil
 }
 
-
 // GitHubWebhookDelivery is the durable, deduplicated receipt of a signed
 // GitHub delivery. The original request body is deliberately not retained;
 // only the event classification and routing metadata survive processing.
@@ -219,8 +218,12 @@ type GitHubWebhookDelivery struct {
 func (GitHubWebhookDelivery) TableName() string { return "github_webhook_deliveries" }
 
 func (d *GitHubWebhookDelivery) BeforeCreate(tx *gorm.DB) error {
-	if d.ID == uuid.Nil { d.ID = uuid.New() }
-	if d.ReceivedAt.IsZero() { d.ReceivedAt = time.Now().UTC() }
+	if d.ID == uuid.Nil {
+		d.ID = uuid.New()
+	}
+	if d.ReceivedAt.IsZero() {
+		d.ReceivedAt = time.Now().UTC()
+	}
 	return nil
 }
 
@@ -255,8 +258,14 @@ type GitHubWebhookTarget struct {
 func (GitHubWebhookTarget) TableName() string { return "github_webhook_targets" }
 
 func (t *GitHubWebhookTarget) BeforeCreate(tx *gorm.DB) error {
-	if t.ID == uuid.Nil { t.ID = uuid.New() }
-	if t.ReceivedAt.IsZero() { t.ReceivedAt = time.Now().UTC() }
-	if t.Status == "" { t.Status = WebhookTargetStatusReceived }
+	if t.ID == uuid.Nil {
+		t.ID = uuid.New()
+	}
+	if t.ReceivedAt.IsZero() {
+		t.ReceivedAt = time.Now().UTC()
+	}
+	if t.Status == "" {
+		t.Status = WebhookTargetStatusReceived
+	}
 	return nil
 }

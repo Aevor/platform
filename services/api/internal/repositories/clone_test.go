@@ -218,7 +218,9 @@ func newCloneFixture(t *testing.T, githubHandler http.HandlerFunc) *cloneFixture
 		Classify:    service.classifyJobError,
 		Run: func(ctx context.Context, job *jobs.Job, _ *jobs.Executor) error {
 			var payload intelligenceRefreshPayload
-			if err := json.Unmarshal(job.Payload, &payload); err != nil { return err }
+			if err := json.Unmarshal(job.Payload, &payload); err != nil {
+				return err
+			}
 			_, err := service.RefreshIntelligence(ctx, job.UserID, job.SelectedRepositoryID, payload.IncludeAI)
 			return err
 		},

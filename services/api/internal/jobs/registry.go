@@ -20,7 +20,9 @@ func (r *Registry) Register(definition Definition) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.definitions == nil { r.definitions = make(map[string]Definition) }
+	if r.definitions == nil {
+		r.definitions = make(map[string]Definition)
+	}
 	if _, exists := r.definitions[definition.Type]; exists {
 		return fmt.Errorf("job definition %q is already registered", definition.Type)
 	}

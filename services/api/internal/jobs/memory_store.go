@@ -33,7 +33,9 @@ func (s *MemoryStore) Insert(ctx context.Context, job *Job) (*Job, bool, error) 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.jobs[job.ID]; exists { return nil, false, ErrAlreadyExists }
+	if _, exists := s.jobs[job.ID]; exists {
+		return nil, false, ErrAlreadyExists
+	}
 	key := idempotencyScope(job)
 	if key != "" {
 		if id, ok := s.keys[key]; ok {
@@ -62,14 +64,22 @@ func (s *MemoryStore) Get(ctx context.Context, userID, repositoryID, jobID uuid.
 }
 
 func (s *MemoryStore) FindByIdempotencyKey(ctx context.Context, userID, repositoryID uuid.UUID, key string) (*Job, error) {
-	if err := ctx.Err(); err != nil { return nil, err }
-	if key == "" { return nil, ErrNotFound }
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if key == "" {
+		return nil, ErrNotFound
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	id, ok := s.keys[userID.String()+":"+repositoryID.String()+":"+key]
-	if !ok { return nil, ErrNotFound }
+	if !ok {
+		return nil, ErrNotFound
+	}
 	job := s.jobs[id]
-	if job == nil || job.UserID != userID || job.SelectedRepositoryID != repositoryID { return nil, ErrNotFound }
+	if job == nil || job.UserID != userID || job.SelectedRepositoryID != repositoryID {
+		return nil, ErrNotFound
+	}
 	return cloneJob(job), nil
 }
 
@@ -141,7 +151,9 @@ func (s *MemoryStore) Claim(ctx context.Context, workerID string, now, leaseUnti
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if workerID == "" { return nil, errors.New("worker id is required") }
+	if workerID == "" {
+		return nil, errors.New("worker id is required")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.recoverExpired(now)

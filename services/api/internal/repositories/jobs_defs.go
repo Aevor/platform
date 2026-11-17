@@ -99,8 +99,12 @@ func validatePullRequestPayload(raw json.RawMessage) (any, error) {
 
 func validateWebhookSyncPayload(raw json.RawMessage) (any, error) {
 	var payload WebhookSyncPayload
-	if err := unmarshalJobPayload(raw, &payload); err != nil { return nil, err }
-	if payload.TargetID == uuid.Nil { return nil, errors.New("target_id is required") }
+	if err := unmarshalJobPayload(raw, &payload); err != nil {
+		return nil, err
+	}
+	if payload.TargetID == uuid.Nil {
+		return nil, errors.New("target_id is required")
+	}
 	return payload, nil
 }
 
@@ -232,7 +236,9 @@ func RegisterJobDefinitions(reg *jobs.Registry, s *Service) {
 		Classify:        s.classifyJobError,
 		Run: func(ctx context.Context, job *jobs.Job, exec *jobs.Executor) error {
 			var payload WebhookSyncPayload
-			if err := unmarshalJobPayload(job.Payload, &payload); err != nil { return err }
+			if err := unmarshalJobPayload(job.Payload, &payload); err != nil {
+				return err
+			}
 			_, err := s.ProcessWebhookTarget(ctx, payload.TargetID)
 			return err
 		},
