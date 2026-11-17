@@ -43,7 +43,7 @@ func NewHandler(service *Service) *Handler {
 // NewHandlerWithJobs wires the same shared job service used by the API worker.
 func NewHandlerWithJobs(service *Service, jobService *jobs.Service) *Handler {
 	service.SetJobsService(jobService)
-	return &Handler{service: service, jobs: jobService}
+	return &Handler{service: service, jobs: service.GetJobsService()}
 }
 
 // List handles GET /repositories. The Aevor identity comes exclusively from
