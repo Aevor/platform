@@ -32,6 +32,7 @@ func (s *MemoryStore) Insert(ctx context.Context, job *Job) (*Job, bool, error) 
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, exists := s.jobs[job.ID]; exists { return nil, false, ErrAlreadyExists }
 	key := idempotencyScope(job)
 	if key != "" {
 		if id, ok := s.keys[key]; ok {
@@ -59,6 +60,18 @@ func (s *MemoryStore) Get(ctx context.Context, userID, repositoryID, jobID uuid.
 	return cloneJob(job), nil
 }
 
+func (s *MemoryStore) FindByIdempotencyKey(ctx context.Context, userID, repositoryID uuid.UUID, key string) (*Job, error) {
+	if err := ctx.Err(); err != nil { return nil, err }
+	if key == "" { return nil, ErrNotFound }
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	id, ok := s.keys[userID.String()+":"+repositoryID.String()+":"+key]
+	if !ok { return nil, ErrNotFound }
+	job := s.jobs[id]
+	if job == nil || job.UserID != userID || job.SelectedRepositoryID != repositoryID { return nil, ErrNotFound }
+	return cloneJob(job), nil
+}
+
 func (s *MemoryStore) List(ctx context.Context, userID, repositoryID uuid.UUID, options ListOptions) ([]Job, int, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
@@ -79,9 +92,6 @@ func (s *MemoryStore) List(ctx context.Context, userID, repositoryID uuid.UUID, 
 		all = append(all, *cloneJob(job))
 	}
 	sort.Slice(all, func(i, j int) bool {
-		if all[i].Priority != all[j].Priority {
-			return all[i].Priority > all[j].Priority
-		}
 		if !all[i].CreatedAt.Equal(all[j].CreatedAt) {
 			return all[i].CreatedAt.After(all[j].CreatedAt)
 		}
@@ -130,6 +140,7 @@ func (s *MemoryStore) Claim(ctx context.Context, workerID string, now, leaseUnti
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if workerID == "" { return nil, errors.New("worker id is required") }
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.recoverExpired(now)
@@ -170,7 +181,7 @@ func (s *MemoryStore) RenewLease(ctx context.Context, jobID uuid.UUID, workerID 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	job, ok := s.jobs[jobID]
-	if !ok || job.LeaseOwner != workerID || (job.Status != StatusRunning && job.Status != StatusCancelRequested) {
+	if !ok || job.LeaseOwner != workerID || (job.Status != StatusRunning && job.Status != StatusCancelRequested) || job.LeaseExpiresAt == nil || !job.LeaseExpiresAt.After(time.Now().UTC()) {
 		return ErrLeaseLost
 	}
 	job.LeaseExpiresAt = timePtr(leaseUntil)
@@ -185,16 +196,34 @@ func (s *MemoryStore) Save(ctx context.Context, job *Job, workerID string) error
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, ok := s.jobs[job.ID]
-	if !ok || current.LeaseOwner != workerID || current.UserID != job.UserID || current.SelectedRepositoryID != job.SelectedRepositoryID {
+	now := time.Now().UTC()
+	if !ok || current.LeaseOwner != workerID || current.UserID != job.UserID || current.SelectedRepositoryID != job.SelectedRepositoryID || current.LeaseExpiresAt == nil || !current.LeaseExpiresAt.After(now) {
 		return ErrLeaseLost
 	}
 	if current.Status != StatusRunning && current.Status != StatusCancelRequested {
 		return ErrLeaseLost
 	}
-	copy := cloneJob(job)
+	copy := cloneJob(current)
+	copy.Result = append(copy.Result[:0], job.Result...)
+	if current.Status == StatusCancelRequested {
+		copy.Status = StatusCancelled
+		copy.CancelledAt = timePtr(now)
+		copy.CompletedAt = timePtr(now)
+		copy.ErrorCategory = ""
+		copy.ErrorReference = ""
+	} else {
+		copy.Status = job.Status
+		copy.ScheduledAt = job.ScheduledAt
+		copy.StartedAt = job.StartedAt
+		copy.CompletedAt = job.CompletedAt
+		copy.CancelledAt = job.CancelledAt
+		copy.CurrentStage = job.CurrentStage
+		copy.ErrorCategory = job.ErrorCategory
+		copy.ErrorReference = job.ErrorReference
+	}
 	copy.LeaseOwner = ""
 	copy.LeaseExpiresAt = nil
-	copy.UpdatedAt = time.Now().UTC()
+	copy.UpdatedAt = now
 	s.jobs[job.ID] = copy
 	return nil
 }
@@ -246,6 +275,7 @@ func (s *MemoryStore) Retry(ctx context.Context, userID, repositoryID, jobID uui
 	job.ErrorCategory = ""
 	job.ErrorReference = ""
 	job.CurrentStage = ""
+	job.Result = nil
 	job.UpdatedAt = now
 	return cloneJob(job), nil
 }
