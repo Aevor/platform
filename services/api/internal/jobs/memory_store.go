@@ -2,7 +2,8 @@ package jobs
 
 import (
 	"context"
-	"sort"
+	"errors"
+	"sort
 	"sync"
 	"time"
 
@@ -160,7 +161,10 @@ func (s *MemoryStore) Claim(ctx context.Context, workerID string, now, leaseUnti
 		if !candidates[i].ScheduledAt.Equal(candidates[j].ScheduledAt) {
 			return candidates[i].ScheduledAt.Before(candidates[j].ScheduledAt)
 		}
-		return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
+		if !candidates[i].CreatedAt.Equal(candidates[j].CreatedAt) {
+			return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
+		}
+		return candidates[i].ID.String() < candidates[j].ID.String()
 	})
 	job := candidates[0]
 	job.Status = StatusRunning
