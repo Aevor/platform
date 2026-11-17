@@ -1,0 +1,61 @@
+name: Background jobs CI
+
+on:
+  pull_request:
+    paths:
+      - "services/api/internal/jobs/**"
+      - "services/api/internal/repositories/jobs_defs.go"
+      - "services/api/internal/repositories/webhook*.go"
+      - "services/api/internal/repositories/model.go"
+      - "services/api/internal/repositories/migration.go"
+      - "services/api/cmd/server/main.go"
+      - ".github/workflows/jobs-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "services/api/internal/jobs/**"
+      - "services/api/internal/repositories/jobs_defs.go"
+      - "services/api/internal/repositories/webhook*.go"
+      - "services/api/internal/repositories/model.go"
+      - "services/api/internal/repositories/migration.go"
+      - "services/api/cmd/server/main.go"
+      - ".github/workflows/jobs-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  jobs-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: aevor_jobs_test
+          POSTGRES_USER: aevor
+          POSTGRES_PASSWORD: aevor
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aevor -d aevor_jobs_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.1
+          cache-dependency-path: services/api/go.sum
+      - name: Check job package formatting
+        working-directory: services/api
+        run: test -z "$(gofmt -l internal/jobs)"
+      - name: Vet job package
+        working-directory: services/api
+        run: go vet ./internal/jobs
+      - name: Run unit and PostgreSQL integration tests with race detector
+        working-directory: services/api
+        env:
+          AEVOR_TEST_DATABASE_DSN: host=localhost port=5432 user=aevor password=aevor dbname=aevor_jobs_test sslmode=disable
+        run: go test -race ./internal/jobs -count=1
