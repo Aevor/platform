@@ -112,11 +112,13 @@ func RegisterJobDefinitions(reg *jobs.Registry, s *Service) {
 		Run: func(ctx context.Context, job *jobs.Job, exec *jobs.Executor) error {
 			result, err := s.IndexRepositoryContent(ctx, job.UserID, job.SelectedRepositoryID)
 			if err == nil {
-				exec.SetResult(indexJobResult{
+				if err := exec.SetResult(indexJobResult{
 					RepositoryID: job.SelectedRepositoryID,
 					Files:        result.Files,
 					Chunks:       result.Chunks,
-				})
+				}); err != nil {
+					return err
+				}
 			}
 			return err
 		},
