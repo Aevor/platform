@@ -36,8 +36,23 @@ func TestService_EnqueueValidatesAndBoundsPayload(t *testing.T) {
 		t.Fatalf("unknown type error = %v", err)
 	}
 
+	ownerID, repositoryID := uuid.New(), uuid.New()
 	_, err = service.Enqueue(context.Background(), EnqueueOptions{
-		UserID: uuid.New(), SelectedRepositoryID: uuid.New(), Type: "issue.analysis",
+		UserID: ownerID, SelectedRepositoryID: repositoryID, Type: "issue.analysis",
+		Payload: map[string]string{"issue_id": "not-a-uuid"},
+	})
+	if !errors.Is(err, ErrInvalidPayload) {
+		t.Fatalf("invalid under-limit payload error = %v, want ErrInvalidPayload", err)
+	}
+	valid, err := service.Enqueue(context.Background(), EnqueueOptions{
+		UserID: ownerID, SelectedRepositoryID: repositoryID, Type: "issue.analysis",
+		Payload: map[string]string{"issue_id": "00000000-0000-4000-8000-000000000001"},
+	})
+	if err != nil || valid == nil {
+		t.Fatalf("valid payload was rejected: job=%v err=%v", valid, err)
+	}
+	_, err = service.Enqueue(context.Background(), EnqueueOptions{
+		UserID: ownerID, SelectedRepositoryID: repositoryID, Type: "issue.analysis",
 		Payload: strings.Repeat("x", 256),
 	})
 	if !errors.Is(err, ErrPayloadTooLarge) {
@@ -81,7 +96,6 @@ func TestWorker_RetryAndSanitizeFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
 	job, err := service.Enqueue(context.Background(), EnqueueOptions{UserID: uuid.New(), SelectedRepositoryID: uuid.New(), Type: "test"})
 	if err != nil {
 		t.Fatal(err)
@@ -96,15 +110,29 @@ func TestWorker_RetryAndSanitizeFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	if stored.Status != StatusRetrying {
-		t.Fatalf("status = %s, want retrying", stored.Status)
+		t.Fatalf("first status = %s, want retrying", stored.Status)
+	}
+	if stored.ErrorReference != "external_service_failure" || strings.Contains(stored.ErrorReference, "ghp_secret") || strings.Contains(stored.ErrorReference, "raw response") {
+		t.Fatalf("failure metadata is not sanitized: category=%q reference=%q", stored.ErrorCategory, stored.ErrorReference)
 	}
 	if strings.Contains(string(stored.Payload), "ghp_secret") || strings.Contains(string(stored.Result), "ghp_secret") {
 		t.Fatal("job payload/result contains raw secret")
 	}
 
-	// Advance the schedule without depending on a wall-clock sleep.
-	stored.ScheduledAt = now.Add(-time.Second)
-	if err := store.Save(context.Background(), stored, "test-worker"); err == nil {
-		t.Fatal("unowned mutation unexpectedly succeeded")
+	// The backoff is intentionally tiny in this test so a second attempt can
+	// be observed without editing persisted job state out of band.
+	time.Sleep(10 * time.Millisecond)
+	if _, err := worker.ProcessNow(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = service.Get(context.Background(), job.UserID, job.SelectedRepositoryID, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != StatusFailed || stored.Attempts != 2 {
+		t.Fatalf("second status=%s attempts=%d, want failed after two attempts", stored.Status, stored.Attempts)
+	}
+	if stored.ErrorReference != "external_service_failure" {
+		t.Fatalf("terminal error reference = %q, want sanitized stable reference", stored.ErrorReference)
 	}
 }
