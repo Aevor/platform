@@ -64,6 +64,15 @@ func (s *PostgresStore) Get(ctx context.Context, userID, repositoryID, jobID uui
 	return cloneJob(&job), nil
 }
 
+func (s *PostgresStore) FindByIdempotencyKey(ctx context.Context, userID, repositoryID uuid.UUID, key string) (*Job, error) {
+	if key == "" { return nil, ErrNotFound }
+	var job Job
+	err := s.db.WithContext(ctx).Where("user_id = ? AND selected_repository_id = ? AND idempotency_key = ?", userID, repositoryID, key).First(&job).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) { return nil, ErrNotFound }
+	if err != nil { return nil, err }
+	return cloneJob(&job), nil
+}
+
 func (s *PostgresStore) List(ctx context.Context, userID, repositoryID uuid.UUID, options ListOptions) ([]Job, int, error) {
 	query := s.db.WithContext(ctx).Model(&Job{}).
 		Where("user_id = ? AND selected_repository_id = ?", userID, repositoryID)
@@ -105,7 +114,7 @@ func (s *PostgresStore) Claim(ctx context.Context, workerID string, now, leaseUn
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
 			Where("status IN ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?",
 				[]string{StatusRunning, StatusCancelRequested}, now).
-			Find(&expired).Error; err != nil {
+			Limit(100).Find(&expired).Error; err != nil {
 			return err
 		}
 		for i := range expired {
@@ -177,16 +186,16 @@ func (s *PostgresStore) RenewLease(ctx context.Context, jobID uuid.UUID, workerI
 
 func (s *PostgresStore) Save(ctx context.Context, job *Job, workerID string) error {
 	result := s.db.WithContext(ctx).Model(&Job{}).
-		Where("id = ? AND lease_owner = ? AND status IN ?", job.ID, workerID, []string{StatusRunning, StatusCancelRequested}).
+		Where("id = ? AND lease_owner = ? AND status IN ? AND lease_expires_at > ?", job.ID, workerID, []string{StatusRunning, StatusCancelRequested}, time.Now().UTC()).
 		Updates(map[string]any{
 			"result":           job.Result,
-			"status":           job.Status,
+			"status":           gorm.Expr("CASE WHEN status = ? THEN ? ELSE ? END", StatusCancelRequested, StatusCancelled, job.Status),
 			"attempts":         job.Attempts,
 			"max_attempts":     job.MaxAttempts,
 			"scheduled_at":     job.ScheduledAt,
 			"started_at":       job.StartedAt,
-			"completed_at":     job.CompletedAt,
-			"cancelled_at":     job.CancelledAt,
+			"completed_at":     gorm.Expr("CASE WHEN status = ? THEN ? ELSE ? END", StatusCancelRequested, time.Now().UTC(), job.CompletedAt),
+			"cancelled_at":     gorm.Expr("CASE WHEN status = ? THEN ? ELSE ? END", StatusCancelRequested, time.Now().UTC(), job.CancelledAt),
 			"current_stage":    job.CurrentStage,
 			"error_category":   job.ErrorCategory,
 			"error_reference":  job.ErrorReference,
@@ -259,6 +268,7 @@ func (s *PostgresStore) Retry(ctx context.Context, userID, repositoryID, jobID u
 		job.ErrorCategory = ""
 		job.ErrorReference = ""
 		job.CurrentStage = ""
+		job.Result = nil
 		job.UpdatedAt = now
 		return tx.Save(&job).Error
 	})
