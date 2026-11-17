@@ -1,6 +1,6 @@
 # Background jobs
 
-The API runs repository and issue workflows through a PostgreSQL-backed job queue. Job state must not live only in a process: more than one API instance can share the same database, and a process restart must not discard queued work.
+The API supports a PostgreSQL-backed job queue. Only operations explicitly enqueued through the job service run asynchronously; registering a definition does not automatically move an HTTP workflow to the queue. Durable storage allows multiple API instances to share jobs and preserves queued work across process restarts.
 
 ## Storage and ownership
 
@@ -8,7 +8,7 @@ The `background_jobs` table stores job identity, owner and selected-repository I
 
 The payload and result size limits default to 64 KiB each. Job payloads should contain identifiers and small control values only. Do not put GitHub tokens, credentials, source-file contents, raw AI responses, or arbitrary exception text in job records. Error storage is intentionally limited to a coarse category and a bounded stable reference.
 
-All read and mutation operations are scoped by authenticated user and selected repository. The API resolves repository ownership before looking up a job, so a foreign job is indistinguishable from a missing job.
+API reads and user-triggered mutations are scoped by authenticated user and selected repository. The API resolves repository ownership before looking up a job, so a foreign job is indistinguishable from a missing job. Worker claiming and retention are system-wide queue operations across owners.
 
 ## Claiming and recovery
 
@@ -20,7 +20,7 @@ An explicit owner cancellation is distinct from process shutdown. A running canc
 
 ## Retries, idempotency, and retention
 
-- Definitions own their maximum attempt count and optional error classifier. The worker applies exponential retry backoff (five seconds initially, capped at five minutes by default) only to retryable categories.
+- Definitions provide the default attempt count and optional error classifier. A caller may override the default attempt count for a specific enqueue through `EnqueueOptions.MaxAttempts`. The worker applies exponential retry backoff (five seconds initially, capped at five minutes by default) only to retryable categories.
 - Idempotency keys are unique per user and selected repository. Repeating an enqueue with the same non-empty key returns the original job rather than creating another.
 - Failed jobs can be explicitly retried by their owner. Retry resets the attempt counter and schedules a fresh execution.
 - Succeeded, failed, and cancelled records are retained for 30 days by default; the worker periodically prunes older terminal records. Active and retrying work is never pruned.
@@ -32,14 +32,14 @@ The in-memory store remains available for isolated unit and HTTP-handler tests. 
 Run the API unit and race tests from `services/api`:
 
 ```sh
-go test -race ./internal/jobs ./internal/repositories
+go test -race ./internal/jobs -count=1
 ```
 
-The PostgreSQL integration test uses a dedicated disposable database and is opt-in:
+The PostgreSQL integration test is opt-in. Provision a fresh, disposable PostgreSQL database named with the `_test` suffix (for example `aevor_jobs_test`) before running it. The test refuses to run against any database name without that suffix; it does not create or clean up a database:
 
 ```sh
-export AEVOR_TEST_DATABASE_DSN='host=localhost port=5433 user=aevor password=aevor dbname=aevor sslmode=disable'
+export AEVOR_TEST_DATABASE_DSN='host=localhost port=5433 user=aevor password=aevor dbname=aevor_jobs_test sslmode=disable'
 go test ./internal/jobs -run TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims -count=1
 ```
 
-The integration test only deletes rows carrying its own randomly generated test user ID. Do not point it at a shared production database.
+The integration test only deletes rows carrying its own randomly generated test user ID. Do not point it at the API development database or any shared production database.
