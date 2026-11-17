@@ -42,7 +42,16 @@ func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 	t.Cleanup(func() { _ = db.WithContext(context.Background()).Where("user_id = ?", userID).Delete(&Job{}).Error })
 
 	storeA := NewPostgresStore(db)
-	storeB := NewPostgresStore(db)
+	dbB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open second PostgreSQL pool: %v", err)
+	}
+	sqlDBB, err := dbB.DB()
+	if err != nil {
+		t.Fatalf("get second SQL pool: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDBB.Close() })
+	storeB := NewPostgresStore(dbB)
 	now := time.Now().UTC()
 	const jobCount = 16
 	for i := 0; i < jobCount; i++ {
@@ -111,21 +120,42 @@ func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 		}
 	}
 
-	// An abandoned lease is recoverable through a new store/worker instance.
+	// Finish the concurrency fixture rows so the subsequent lease scenario is
+	// isolated from any remaining ready/leased work for this test owner.
+	if err := db.WithContext(ctx).Model(&Job{}).Where("user_id = ?", userID).Updates(map[string]any{
+		"status": StatusSucceeded, "completed_at": now, "lease_owner": "", "lease_expires_at": nil,
+	}).Error; err != nil {
+		t.Fatalf("finish concurrent claim fixtures: %v", err)
+	}
+
+	// An abandoned lease is recoverable across two independently opened
+	// PostgreSQL pools, survives a retry transition, and records exhaustion.
+	leaseNow := time.Now().UTC().Add(time.Second)
 	leaseJob := &Job{
 		ID: uuid.New(), UserID: userID, SelectedRepositoryID: repositoryID,
 		Type: "integration.lease", Payload: []byte(`{}`), Status: StatusQueued,
-		MaxAttempts: 3, ScheduledAt: now, CreatedAt: now, UpdatedAt: now,
+		MaxAttempts: 2, ScheduledAt: leaseNow, CreatedAt: leaseNow, UpdatedAt: leaseNow,
 	}
 	if _, _, err := storeA.Insert(ctx, leaseJob); err != nil {
 		t.Fatal(err)
 	}
-	firstClaim, err := storeA.Claim(ctx, "old-worker", now, now.Add(time.Second))
-	if err != nil || firstClaim == nil || firstClaim.ID != leaseJob.ID {
+	firstClaim, err := storeA.Claim(ctx, "old-worker", leaseNow, leaseNow.Add(time.Second))
+	if err != nil || firstClaim == nil || firstClaim.ID != leaseJob.ID || firstClaim.Attempts != 1 {
 		t.Fatalf("initial lease claim: job=%v err=%v", firstClaim, err)
 	}
-	reclaimed, err := storeB.Claim(ctx, "new-worker", now.Add(2*time.Second), now.Add(3*time.Second))
+	reclaimed, err := storeB.Claim(ctx, "new-worker", leaseNow.Add(2*time.Second), leaseNow.Add(3*time.Second))
 	if err != nil || reclaimed == nil || reclaimed.ID != leaseJob.ID || reclaimed.Attempts != 2 {
 		t.Fatalf("expired lease was not recovered: job=%v err=%v", reclaimed, err)
+	}
+	if terminalClaim, err := storeA.Claim(ctx, "final-worker", leaseNow.Add(4*time.Second), leaseNow.Add(5*time.Second)); err != nil || terminalClaim != nil {
+		t.Fatalf("exhausted lease claim = %v, err=%v; want no runnable job", terminalClaim, err)
+	}
+	failed, err := storeB.Get(ctx, userID, repositoryID, leaseJob.ID)
+	if err != nil || failed.Status != StatusFailed || failed.Attempts != 2 || failed.ErrorReference != "worker_lease_expired" {
+		t.Fatalf("persisted exhausted job = %+v err=%v", failed, err)
+	}
+	retried, err := storeB.Retry(ctx, userID, repositoryID, leaseJob.ID, leaseNow.Add(6*time.Second))
+	if err != nil || retried.Status != StatusQueued || retried.Attempts != 0 || len(retried.Result) != 0 {
+		t.Fatalf("manual retry = %+v err=%v; want clean queued attempt", retried, err)
 	}
 }
