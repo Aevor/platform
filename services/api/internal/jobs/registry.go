@@ -15,11 +15,12 @@ func NewRegistry() *Registry {
 }
 
 func (r *Registry) Register(definition Definition) error {
-	if definition.Type == "" || definition.Run == nil {
+	if definition.Type == "" || len(definition.Type) > 96 || definition.Run == nil {
 		return fmt.Errorf("job definition requires a type and run function")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.definitions == nil { r.definitions = make(map[string]Definition) }
 	if _, exists := r.definitions[definition.Type]; exists {
 		return fmt.Errorf("job definition %q is already registered", definition.Type)
 	}
