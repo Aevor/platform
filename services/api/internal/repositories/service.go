@@ -69,8 +69,12 @@ type Service struct {
 	// is not configured; AnalyzeRepositoryContent fails closed in that case.
 	aiClient *ai.Client
 
-	// jobs is shared by HTTP handlers and the background worker.
+	// jobs is shared by HTTP handlers, the webhook dispatcher, and workers.
 	jobs *jobs.Service
+
+	// Webhook deliveries and targets are durable and shared across API instances.
+	webhookStore WebhookStore
+	webhookSecret string
 }
 
 func NewService(
@@ -87,7 +91,8 @@ func NewService(
 	representer *representation.Service,
 	index *indexing.Index,
 	aiClient *ai.Client,
-	_ ...any,
+	webhookSecret string,
+	jobService *jobs.Service,
 ) *Service {
 	return &Service{
 		users:             userService,
@@ -105,6 +110,8 @@ func NewService(
 		representer:       representer,
 		index:             index,
 		aiClient:          aiClient,
+		webhookSecret:     webhookSecret,
+		jobs:              jobService,
 	}
 }
 
@@ -1047,4 +1054,20 @@ func (s *Service) extractAndChunk(
 // the worker so durable state and cancellation remain consistent.
 func (s *Service) SetJobsService(service *jobs.Service) {
 	s.jobs = service
+}
+
+func (s *Service) GetJobsService() *jobs.Service {
+	return s.jobs
+}
+
+func (s *Service) GetWebhookSecret() string {
+	return s.webhookSecret
+}
+
+func (s *Service) ConfigureWebhookStore(store WebhookStore) {
+	s.webhookStore = store
+}
+
+func (s *Service) GetWebhookStore() WebhookStore {
+	return s.webhookStore
 }
