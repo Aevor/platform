@@ -108,26 +108,30 @@ func TestMemoryStore_RetriesThenMarksExpiredJobFailed(t *testing.T) {
 	store := NewMemoryStore()
 	now := time.Now().UTC()
 	job := testJob(now)
-	job.MaxAttempts = 1
+	job.MaxAttempts = 2
 	if _, _, err := store.Insert(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
 	first, err := store.Claim(context.Background(), "worker-a", now, now.Add(time.Second))
-	if err != nil || first == nil {
-		t.Fatalf("claim: %v", err)
+	if err != nil || first == nil || first.Attempts != 1 {
+		t.Fatalf("first claim = %+v, err=%v", first, err)
 	}
-	recovered, err := store.Claim(context.Background(), "worker-b", now.Add(2*time.Second), now.Add(3*time.Second))
+	second, err := store.Claim(context.Background(), "worker-b", now.Add(2*time.Second), now.Add(3*time.Second))
+	if err != nil || second == nil || second.Status != StatusRunning || second.Attempts != 2 {
+		t.Fatalf("first lease recovery should retry as attempt 2: job=%+v err=%v", second, err)
+	}
+	third, err := store.Claim(context.Background(), "worker-c", now.Add(4*time.Second), now.Add(5*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovered != nil {
-		t.Fatalf("job with exhausted attempts should become failed, got %+v", recovered)
+	if third != nil {
+		t.Fatalf("exhausted lease should become terminal failure, got %+v", third)
 	}
 	stored, err := store.Get(context.Background(), job.UserID, job.SelectedRepositoryID, job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Status != StatusFailed || stored.ErrorReference != "worker_lease_expired" {
-		t.Fatalf("recovered job = %+v, want terminal failure with bounded lease reference", stored)
+	if stored.Status != StatusFailed || stored.Attempts != 2 || stored.ErrorReference != "worker_lease_expired" {
+		t.Fatalf("recovered job = %+v, want terminal failure after retry", stored)
 	}
 }
