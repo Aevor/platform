@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,9 +13,9 @@ import (
 	"gorm.io/gorm"
 )
 
-// This test is intentionally opt-in and requires a disposable PostgreSQL
-// database. Set AEVOR_TEST_DATABASE_DSN; the test scopes cleanup to its own
-// randomly generated user ID and never truncates application tables.
+// This test is intentionally opt-in and requires a fresh, disposable PostgreSQL
+// database whose name ends in "_test". Never point it at the application DB.
+// The test scopes cleanup to its own randomly generated user ID.
 func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 	dsn := os.Getenv("AEVOR_TEST_DATABASE_DSN")
 	if dsn == "" {
@@ -24,6 +25,13 @@ func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("connect PostgreSQL: %v", err)
+	}
+	var databaseName string
+	if err := db.Raw("SELECT current_database()").Scan(&databaseName).Error; err != nil {
+		t.Fatalf("identify PostgreSQL test database: %v", err)
+	}
+	if !strings.HasSuffix(databaseName, "_test") {
+		t.Fatalf("refusing to run integration test against database %q: database name must end in _test", databaseName)
 	}
 	if err := Migrate(db); err != nil {
 		t.Fatalf("migrate jobs: %v", err)
@@ -60,7 +68,9 @@ func TestPostgresStore_DurabilityIdempotencyAndConcurrentClaims(t *testing.T) {
 	if err != nil || reloaded.ID != first.ID {
 		t.Fatalf("reload after store recreation: job=%v err=%v", reloaded, err)
 	}
-	duplicate, inserted, err := storeB.Insert(ctx, &first)
+	duplicateInput := first
+	duplicateInput.ID = uuid.New()
+	duplicate, inserted, err := storeB.Insert(ctx, &duplicateInput)
 	if err != nil || inserted || duplicate.ID != first.ID {
 		t.Fatalf("idempotent insert: inserted=%v job=%v err=%v", inserted, duplicate, err)
 	}
