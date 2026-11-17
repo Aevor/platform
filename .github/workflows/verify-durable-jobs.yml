@@ -1,0 +1,49 @@
+name: Verify durable jobs implementation
+
+on:
+  push:
+    branches:
+      - feat-durable-postgres-job-store
+
+permissions:
+  contents: write
+
+jobs:
+  format-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat-durable-postgres-job-store
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.26.1
+          cache-dependency-path: services/api/go.sum
+      - name: Format changed Go sources
+        run: |
+          gofmt -w \
+            services/api/cmd/server/main.go \
+            services/api/internal/jobs/*.go \
+            services/api/internal/repositories/clone_test.go \
+            services/api/internal/repositories/handler.go \
+            services/api/internal/repositories/jobs_defs.go \
+            services/api/internal/repositories/jobs_handler.go \
+            services/api/internal/repositories/migration.go \
+            services/api/internal/repositories/model.go \
+            services/api/internal/repositories/pull_request_handlers.go \
+            services/api/internal/repositories/service.go
+      - name: Commit formatting
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add services/api/cmd/server/main.go services/api/internal/jobs services/api/internal/repositories/clone_test.go services/api/internal/repositories/handler.go services/api/internal/repositories/jobs_defs.go services/api/internal/repositories/jobs_handler.go services/api/internal/repositories/migration.go services/api/internal/repositories/model.go services/api/internal/repositories/pull_request_handlers.go services/api/internal/repositories/service.go
+          if ! git diff --cached --quiet; then
+            git commit -m "style(jobs): format durable job implementation"
+            git push origin HEAD:feat-durable-postgres-job-store
+          fi
+      - name: Verify isolated job-engine race tests
+        working-directory: services/api
+        run: go test -race ./internal/jobs -count=1
+      - name: Vet isolated job engine
+        working-directory: services/api
+        run: go vet ./internal/jobs
