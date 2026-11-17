@@ -130,6 +130,10 @@ func (s *Service) Get(ctx context.Context, userID, repositoryID, jobID uuid.UUID
 	return s.store.Get(ctx, userID, repositoryID, jobID)
 }
 
+func (s *Service) FindByIdempotencyKey(ctx context.Context, userID, repositoryID uuid.UUID, key string) (*Job, error) {
+	return s.store.FindByIdempotencyKey(ctx, userID, repositoryID, key)
+}
+
 func (s *Service) List(ctx context.Context, userID, repositoryID uuid.UUID, options ListOptions) ([]Job, int, error) {
 	if options.Limit < 0 || options.Offset < 0 {
 		return nil, 0, ErrInvalidPayload
@@ -150,7 +154,11 @@ func (s *Service) Cancel(ctx context.Context, userID, repositoryID, jobID uuid.U
 			cancel()
 		}
 	}
-	s.record(ctx, job, "JOB_CANCEL_REQUESTED", "success", 0, "", "")
+	if job.Status == StatusCancelled {
+		s.record(ctx, job, "JOB_CANCELLED", "success", 0, "", "")
+	} else {
+		s.record(ctx, job, "JOB_CANCEL_REQUESTED", "success", 0, "", "")
+	}
 	return job, nil
 }
 
