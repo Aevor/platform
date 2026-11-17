@@ -13,5 +13,7 @@ func Migrate(db *gorm.DB) error {
 		&RepositoryIssue{},
 		&RepositoryPullRequest{},
 		&RepositoryCommit{},
+		&GitHubWebhookDelivery{},
+		&GitHubWebhookTarget{},
 	)
 }
